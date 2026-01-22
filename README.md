@@ -10,21 +10,24 @@
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue?style=for-the-badge)]()
 
 ```typescript
+pi_messenger({ join: true, spec: "./auth-spec.md" })
+pi_messenger({ claim: "TASK-01", reason: "Implementing login flow" })
 pi_messenger({ to: "GoldFalcon", message: "Done with auth, it's yours" })
-pi_messenger({ reserve: ["src/auth/"], reason: "Refactoring" })
 ```
 
 ## Why
 
 Running multiple pi instances on the same codebase leads to chaos. One agent rewrites a file while another is mid-edit. Neither knows the other exists.
 
-Pi Messenger fixes this with three primitives:
+Pi Messenger fixes this with four primitives:
 
 **Discovery** - Agents register with memorable names (SwiftRaven, IronKnight) when they join the mesh. See who's active, what they're working on, which model they're using, and which git branch they're on.
 
 **Messaging** - Send messages between agents. Recipients wake up immediately (even if idle) and see the message as a steering prompt. Coordinate handoffs, ask questions, broadcast status.
 
 **File Reservations** - Claim files or directories. Other agents get blocked with a clear message telling them who to coordinate with. Auto-releases when you exit.
+
+**Swarm Coordination** - Multiple agents work on the same spec file. Claim tasks atomically, mark them complete with notes, see who's doing what. No double work, no stepping on toes.
 
 ## Comparison
 
@@ -33,6 +36,7 @@ Pi Messenger fixes this with three primitives:
 | Agent discovery | Automatic | Manual | None |
 | Real-time messaging | Yes (file watcher) | No | Chat app |
 | File conflict prevention | Reservations | Hope | Yelling |
+| Task claiming | Atomic locks | First-come conflicts | Spreadsheet |
 | Setup required | None | Write conventions | Write conventions |
 | Daemon/server | No | No | No |
 
@@ -53,15 +57,18 @@ msg: SwiftRaven (2 peers) ●3
 ## Quick Start
 
 ```typescript
-// Join the agent mesh (required before other operations)
-pi_messenger({ join: true })
+// Join the agent mesh with a spec to work on
+pi_messenger({ join: true, spec: "./tasks.md" })
 // → "Joined as SwiftRaven in backend on main. 2 peers active."
 
-// Check your status
-pi_messenger({})
+// See swarm status - who's claimed what
+pi_messenger({ swarm: true })
 
-// List active agents
-pi_messenger({ list: true })
+// Claim a task (one claim per agent at a time)
+pi_messenger({ claim: "TASK-01", reason: "Implementing auth" })
+
+// Complete the task with notes
+pi_messenger({ complete: "TASK-01", notes: "Added JWT validation" })
 
 // Send a message
 pi_messenger({ to: "GoldFalcon", message: "Auth module ready for review" })
@@ -78,6 +85,39 @@ pi_messenger({ release: true })
 
 **Note:** The `/messenger` command auto-joins when opened.
 
+## Swarm Coordination
+
+When multiple agents work on the same spec, they can coordinate via atomic task claiming:
+
+```typescript
+// Join with a spec file
+pi_messenger({ join: true, spec: "./feature-spec.md" })
+
+// See what's claimed and completed
+pi_messenger({ swarm: true })
+// → Swarm: ./feature-spec.md
+//   Completed: TASK-01, TASK-02
+//   In progress: TASK-03 (you), TASK-04 (GoldFalcon)
+//   Teammates: GoldFalcon, IronKnight
+
+// Claim a task (fails if someone else has it)
+pi_messenger({ claim: "TASK-05" })
+
+// Release without completing (changed your mind)
+pi_messenger({ unclaim: "TASK-05" })
+
+// Mark complete with notes
+pi_messenger({ complete: "TASK-05", notes: "Added error handling" })
+```
+
+**Rules:**
+- One claim per agent at a time (complete or unclaim before claiming another)
+- Claims are atomic (lock-protected, no double-claims)
+- Stale claims auto-cleanup when agents die (PID check)
+- Completions are permanent and include who completed them
+
+The overlay's Agents tab groups agents by spec and shows current claims.
+
 ## Features
 
 ### Adaptive Agent Display
@@ -89,6 +129,7 @@ Output adapts based on where agents are working:
 | Same folder + branch | Compact: name, model, time |
 | Same folder, different branches | Adds branch per agent |
 | Different folders | Adds folder per agent |
+| Working on specs | Groups by spec, shows claims |
 
 ### File Reservation Enforcement
 
@@ -118,19 +159,17 @@ Auth module is ready for review
 
 ```
 ╭─ Messenger ── SwiftRaven ── 2 peers ────────────────╮
-│ ▸ ● GoldFalcon │ ● IronKnight (1) │ + All           │
+│ ▸ Agents │ ● GoldFalcon │ ● IronKnight (1) │ + All  │
 │─────────────────────────────────────────────────────│
+│ ./feature-spec.md:                                  │
+│   SwiftRaven (you)   TASK-03    Implementing auth   │
+│   GoldFalcon         TASK-04    API endpoints       │
+│   IronKnight         (idle)                         │
 │                                                     │
-│  ┌─ GoldFalcon ─────────────────────── 10m ago ─┐   │
-│  │ Hey, I'm starting on the API endpoints       │   │
-│  └──────────────────────────────────────────────┘   │
-│                                                     │
-│  ┌─ You ────────────────────────────── 5m ago ──┐   │
-│  │ Sounds good, I'll handle auth then           │   │
-│  └──────────────────────────────────────────────┘   │
-│                                                     │
+│ No spec:                                            │
+│   QuickOwl           (idle)                         │
 │─────────────────────────────────────────────────────│
-│ > Type message...                    [Tab] [Enter]  │
+│ > Agents overview                    [Tab] [Enter]  │
 ╰─────────────────────────────────────────────────────╯
 ```
 
@@ -150,6 +189,14 @@ Auth module is ready for review
 pi_messenger({
   // Registration
   join?: boolean,              // Join the agent mesh (required first)
+  spec?: string,               // Spec file to work on (with join or standalone)
+
+  // Swarm coordination
+  swarm?: boolean,             // Get swarm status (all specs or one with spec param)
+  claim?: string,              // Claim a task in your spec
+  unclaim?: string,            // Release a claim without completing
+  complete?: string,           // Mark task complete
+  notes?: string,              // Completion notes (with complete)
 
   // Messaging
   to?: string | string[],      // Recipient(s)
@@ -159,7 +206,7 @@ pi_messenger({
 
   // Reservations
   reserve?: string[],          // Paths (trailing / for directories)
-  reason?: string,             // Why reserving
+  reason?: string,             // Why reserving (or claiming)
   release?: string[] | true,   // Release specific or all
 
   // Other
@@ -168,7 +215,7 @@ pi_messenger({
 })
 ```
 
-**Mode priority:** `join` → `to/broadcast` → `reserve` → `release` → `rename` → `list` → status
+**Mode priority:** `join` → `swarm` → `claim` → `unclaim` → `complete` → `spec` → `to/broadcast` → `reserve` → `release` → `rename` → `list` → status
 
 ## Configuration
 
@@ -214,18 +261,23 @@ Priority (highest to lowest):
 ```
 ~/.pi/agent/messenger/
 ├── registry/
-│   ├── SwiftRaven.json     # name, PID, cwd, model, branch, reservations
+│   ├── SwiftRaven.json     # name, PID, cwd, model, branch, spec, reservations
 │   └── GoldFalcon.json
-└── inbox/
-    ├── SwiftRaven/         # incoming messages
-    └── GoldFalcon/
+├── inbox/
+│   ├── SwiftRaven/         # incoming messages
+│   └── GoldFalcon/
+├── claims.json             # active task claims by spec
+├── completions.json        # completed tasks by spec
+└── swarm.lock              # atomic lock for claim/complete operations
 ```
 
-**Registration** - Agents write JSON with PID, sessionId, cwd, model, git branch. Write-then-verify prevents race conditions. Dead PIDs detected and cleaned up.
+**Registration** - Agents write JSON with PID, sessionId, cwd, model, git branch, spec. Write-then-verify prevents race conditions. Dead PIDs detected and cleaned up.
 
 **Messaging** - Sender writes to recipient's inbox. File watcher triggers immediate delivery as steering message.
 
 **Reservations** - Stored in registration. Checked on `tool_call` events before file operations.
+
+**Swarm** - Claims and completions stored in shared JSON files. All mutations go through `swarm.lock` using atomic `O_CREAT | O_EXCL`. Stale claims cleaned up when owning PID is dead.
 
 **Cleanup** - Clean exit deletes registration. Crash detection via PID check.
 
@@ -235,6 +287,7 @@ Priority (highest to lowest):
 - **Literal path matching** - `src/auth/` won't match `/absolute/path/src/auth/`
 - **Brief rename window** - Messages during rename (ms) may be lost
 - **No persistence** - Messages deleted after delivery
+- **Spec not parsed** - Task IDs are user-defined strings, not extracted from spec files
 
 ## License
 

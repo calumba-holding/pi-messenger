@@ -11,6 +11,7 @@ Visual guide to the internals of pi-messenger.
 │   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐ │
 │   │   Agent A   │    │   Agent B   │    │   Agent C   │    │   Agent D   │ │
 │   │ SwiftRaven  │    │ GoldFalcon  │    │ IronKnight  │    │  CalmBear   │ │
+│   │ spec: auth  │    │ spec: auth  │    │ spec: api   │    │  (no spec)  │ │
 │   └──────┬──────┘    └──────┬──────┘    └──────┬──────┘    └──────┬──────┘ │
 │          │                  │                  │                  │         │
 │          └──────────────────┴──────────────────┴──────────────────┘         │
@@ -18,6 +19,7 @@ Visual guide to the internals of pi-messenger.
 │                                     ▼                                        │
 │          ┌──────────────────────────────────────────────────────┐           │
 │          │              ~/.pi/agent/messenger/                   │           │
+│          │                                                       │           │
 │          │  ┌────────────────────┐  ┌────────────────────┐      │           │
 │          │  │     registry/      │  │       inbox/       │      │           │
 │          │  │                    │  │                    │      │           │
@@ -26,6 +28,14 @@ Visual guide to the internals of pi-messenger.
 │          │  │  IronKnight.json   │  │  IronKnight/       │      │           │
 │          │  │  CalmBear.json     │  │  CalmBear/         │      │           │
 │          │  └────────────────────┘  └────────────────────┘      │           │
+│          │                                                       │           │
+│          │  ┌────────────────────────────────────────────┐      │           │
+│          │  │           Swarm Coordination               │      │           │
+│          │  │                                            │      │           │
+│          │  │  claims.json       Active task claims      │      │           │
+│          │  │  completions.json  Completed tasks         │      │           │
+│          │  │  swarm.lock        Atomic mutex            │      │           │
+│          │  └────────────────────────────────────────────┘      │           │
 │          └──────────────────────────────────────────────────────┘           │
 │                                                                             │
 │                         File-based coordination                             │
@@ -47,7 +57,8 @@ Visual guide to the internals of pi-messenger.
 │    │config.ts│    │store.ts │    │handlers │    │overlay  │    │ lib.ts │ │
 │    │         │    │         │    │   .ts   │    │   .ts   │    │        │ │
 │    │ Config  │    │  File   │    │  Tool   │    │  Chat   │    │ Types  │ │
-│    │ loading │    │   I/O   │    │handlers │    │   UI    │    │ Utils  │ │
+│    │ loading │    │  I/O +  │    │handlers │    │   UI    │    │ Utils  │ │
+│    │         │    │  Swarm  │    │ + Swarm │    │+ Specs  │    │        │ │
 │    └─────────┘    └────┬────┘    └────┬────┘    └────┬────┘    └────────┘ │
 │                        │              │              │              ▲      │
 │                        └──────────────┴──────────────┴──────────────┘      │
@@ -60,11 +71,13 @@ Visual guide to the internals of pi-messenger.
     ┌──────────────────────────────────────────────────────────────────┐
     │                        Module Responsibilities                    │
     ├──────────────┬───────────────────────────────────────────────────┤
-    │  lib.ts      │  Types, constants, pure utility functions         │
+    │  lib.ts      │  Types, constants, pure utility functions,        │
+    │              │  path helpers (resolveSpecPath, displaySpecPath)  │
     │  config.ts   │  Load and merge configuration from 3 sources      │
-    │  store.ts    │  Registry, inbox, watcher, file operations        │
-    │  handlers.ts │  Tool execute functions (send, reserve, etc.)     │
-    │  overlay.ts  │  Chat UI component for /messenger command         │
+    │  store.ts    │  Registry, inbox, watcher, file operations,       │
+    │              │  swarm lock, claims/completions CRUD              │
+    │  handlers.ts │  Tool handlers (send, reserve, claim, complete)   │
+    │  overlay.ts  │  Chat UI with spec grouping and claims display    │
     │  index.ts    │  Extension setup, event handlers, state mgmt      │
     └──────────────┴───────────────────────────────────────────────────┘
 ```
@@ -113,7 +126,7 @@ Visual guide to the internals of pi-messenger.
                     │  {                      │
                     │    name, pid, sessionId,│
                     │    cwd, model, startedAt│
-                    │    gitBranch            │
+                    │    gitBranch, spec      │
                     │  }                      │
                     └────────────┬────────────┘
                                  │
@@ -135,6 +148,7 @@ Visual guide to the internals of pi-messenger.
     │                     ACTIVE OPERATION                            │
     │                                                                 │
     │   • Respond to pi_messenger tool calls                         │
+    │   • Claim/complete tasks in registered spec                    │
     │   • Watch inbox for incoming messages                          │
     │   • Process messages on turn_end                               │
     │   • Update reservations as needed                              │
@@ -149,10 +163,142 @@ Visual guide to the internals of pi-messenger.
                     ┌────────────▼────────────┐
                     │   Stop file watcher     │
                     │   Delete registration   │
+                    │   (claims auto-cleanup  │
+                    │    via stale detection) │
                     └────────────┬────────────┘
                                  │
                                  ▼
                             pi exits
+```
+
+## Swarm Coordination
+
+```
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                    SWARM COORDINATION FLOW                      │
+    └─────────────────────────────────────────────────────────────────┘
+
+
+         CLAIMING A TASK                         COMPLETING A TASK
+         ══════════════                          ═════════════════
+
+    ┌──────────────────────┐                ┌──────────────────────┐
+    │  pi_messenger({      │                │  pi_messenger({      │
+    │    claim: "TASK-01", │                │    complete: "TASK-01",
+    │    reason: "Auth"    │                │    notes: "Added JWT"│
+    │  })                  │                │  })                  │
+    └──────────┬───────────┘                └──────────┬───────────┘
+               │                                       │
+               ▼                                       ▼
+    ┌──────────────────────┐                ┌──────────────────────┐
+    │  Resolve spec path   │                │  Resolve spec path   │
+    │  (from param or      │                │  (from param or      │
+    │   state.spec)        │                │   state.spec)        │
+    └──────────┬───────────┘                └──────────┬───────────┘
+               │                                       │
+               ▼                                       ▼
+    ┌──────────────────────┐                ┌──────────────────────┐
+    │  withSwarmLock()     │                │  withSwarmLock()     │
+    │                      │                │                      │
+    │  Acquire swarm.lock  │                │  Acquire swarm.lock  │
+    │  (O_CREAT | O_EXCL)  │                │  (O_CREAT | O_EXCL)  │
+    └──────────┬───────────┘                └──────────┬───────────┘
+               │                                       │
+               ▼                                       ▼
+    ┌──────────────────────┐                ┌──────────────────────┐
+    │  Cleanup stale       │                │  Check if already    │
+    │  claims (dead PIDs)  │                │  completed           │
+    └──────────┬───────────┘                └──────────┬───────────┘
+               │                                       │
+               ▼                                       ▼
+    ┌──────────────────────┐                ┌──────────────────────┐
+    │  Check: do I have    │                │  Check: is this my   │
+    │  another claim?      │                │  claim?              │
+    └──────────┬───────────┘                └──────────┬───────────┘
+               │                                       │
+          ┌────┴────┐                            ┌────┴────┐
+          │         │                            │         │
+         Yes        No                          Yes        No
+          │         │                            │         │
+          ▼         ▼                            ▼         ▼
+    ┌──────────┐ ┌──────────────┐         ┌──────────┐ ┌──────────┐
+    │  Error:  │ │ Check: is    │         │ Remove   │ │  Error:  │
+    │ already  │ │ task already │         │ from     │ │not_claimed│
+    │ have     │ │ claimed?     │         │ claims   │ │   or     │
+    │ claim    │ └──────┬───────┘         └────┬─────┘ │not_yours │
+    └──────────┘        │                      │       └──────────┘
+                   ┌────┴────┐                 ▼
+                   │         │         ┌──────────────┐
+                  Yes        No        │ Add to       │
+                   │         │         │ completions  │
+                   ▼         ▼         └──────┬───────┘
+             ┌──────────┐ ┌──────────┐        │
+             │  Error:  │ │ Add to   │        ▼
+             │ already  │ │ claims   │ ┌──────────────────┐
+             │ claimed  │ └────┬─────┘ │ Write completions│
+             └──────────┘      │       │ (first!)         │
+                               ▼       └──────┬───────────┘
+                        ┌──────────────┐       │
+                        │ Write claims │       ▼
+                        └──────┬───────┘ ┌──────────────────┐
+                               │         │ Write claims     │
+                               ▼         └──────┬───────────┘
+                        ┌──────────────┐        │
+                        │ Release lock │        ▼
+                        └──────────────┘ ┌──────────────┐
+                                         │ Release lock │
+                                         └──────────────┘
+
+
+    ════════════════════════════════════════════════════════════════════
+
+                         SWARM LOCK MECHANISM
+
+    ════════════════════════════════════════════════════════════════════
+
+    ┌────────────────────────────────────────────────────────────────┐
+    │                                                                │
+    │   1. Try to create swarm.lock with O_CREAT | O_EXCL            │
+    │      (atomic: fails if file exists)                            │
+    │                                                                │
+    │   2. If EEXIST:                                                │
+    │      • Check lock age (stat mtime)                             │
+    │      • If > 10 seconds old:                                    │
+    │        - Read PID from lock file                               │
+    │        - If PID dead → delete stale lock, retry                │
+    │      • Otherwise: wait 100ms, retry (up to 50 times)           │
+    │                                                                │
+    │   3. On success: write our PID to lock file                    │
+    │                                                                │
+    │   4. Execute protected operation                               │
+    │                                                                │
+    │   5. Delete lock file (finally block)                          │
+    │                                                                │
+    └────────────────────────────────────────────────────────────────┘
+
+
+    ════════════════════════════════════════════════════════════════════
+
+                         STALE CLAIM DETECTION
+
+    ════════════════════════════════════════════════════════════════════
+
+    ┌────────────────────────────────────────────────────────────────┐
+    │                                                                │
+    │   A claim is STALE if ANY of:                                  │
+    │                                                                │
+    │   • claim.pid is not alive (process.kill(pid, 0) fails)        │
+    │   • Agent's registration file doesn't exist                    │
+    │   • Registration exists but PID differs                        │
+    │   • Registration exists but sessionId differs                  │
+    │                                                                │
+    │   Stale claims are cleaned up during:                          │
+    │   • claimTask() - before checking conflicts                    │
+    │   • unclaimTask() - before checking ownership                  │
+    │   • completeTask() - before checking ownership                 │
+    │   • getClaims() - filtered out of results                      │
+    │                                                                │
+    └────────────────────────────────────────────────────────────────┘
 ```
 
 ## Message Flow
@@ -306,21 +452,6 @@ Visual guide to the internals of pi-messenger.
                                               │    retries = 0             │
                                               │    startWatcher()          │
                                               └────────────────────────────┘
-
-
-    ┌───────────────────────────────────────────────────────────────────┐
-    │                      RETRY TIMING                                 │
-    ├───────────────────────────────────────────────────────────────────┤
-    │                                                                   │
-    │   Attempt 1: immediate                                            │
-    │   Attempt 2: 1 second delay     (2^0 × 1000ms)                   │
-    │   Attempt 3: 2 second delay     (2^1 × 1000ms)                   │
-    │   Attempt 4: 4 second delay     (2^2 × 1000ms)                   │
-    │   Attempt 5: 8 second delay     (2^3 × 1000ms)                   │
-    │                                                                   │
-    │   Then: wait for turn_end or session event to recover            │
-    │                                                                   │
-    └───────────────────────────────────────────────────────────────────┘
 ```
 
 ## Reservation System
@@ -397,6 +528,7 @@ Visual guide to the internals of pi-messenger.
                                               │    reason: "..."      │
                                               │  }                    │
                                               └───────────────────────┘
+
 
     ════════════════════════════════════════════════════════════════════
 
@@ -478,6 +610,7 @@ Visual guide to the internals of pi-messenger.
                     │  Final Config    │
                     │                  │
                     │ {                │
+                    │   autoRegister,  │
                     │   contextMode,   │
                     │   registration   │
                     │     Context,     │
@@ -539,7 +672,7 @@ Visual guide to the internals of pi-messenger.
 
 
     ┌──────────────────┐         ┌────────────────────────────┐
-    │    tool_call     │───────▶ │  Is tool read/edit/write?  │
+    │    tool_call     │───────▶ │  Is tool edit or write?    │
     └──────────────────┘         └─────────────┬──────────────┘
                                                │
                                     ┌──────────┴──────────┐
@@ -572,10 +705,33 @@ Visual guide to the internals of pi-messenger.
     │                                                                 │
     │   Messenger ── SwiftRaven ── 2 peers            ← Title Bar    │
     │                                                                 │
-    │   ▸ ● GoldFalcon │ ● IronKnight (3) │ + All     ← Tab Bar      │
+    │   ▸ Agents │ ● GoldFalcon │ ● IronKnight (3) │ + All  ← Tabs   │
     │   ─────────────────────────────────────────────                 │
     │                                                                 │
-    │                        Message Area                             │
+    │                     Agents Tab (spec mode)                      │
+    │                                                                 │
+    │   ./feature-spec.md:                                            │
+    │     SwiftRaven (you)   TASK-01    Implementing auth             │
+    │     GoldFalcon         TASK-02    API endpoints                 │
+    │     IronKnight         (idle)                                   │
+    │                                                                 │
+    │   No spec:                                                      │
+    │     CalmBear           (idle)                                   │
+    │                                                                 │
+    │   ─────────────────────────────────────────────                 │
+    │   > Agents overview                          [Tab] [Enter]      │
+    │                                                                 │
+    ╰─────────────────────────────────────────────────────────────────╯
+
+
+    ╭─────────────────────────────────────────────────────────────────╮
+    │                                                                 │
+    │   Messenger ── SwiftRaven ── 2 peers            ← Title Bar    │
+    │                                                                 │
+    │   Agents │ ▸ ● GoldFalcon │ ● IronKnight (3) │ + All  ← Tabs   │
+    │   ─────────────────────────────────────────────                 │
+    │                                                                 │
+    │                      Chat Tab (messages)                        │
     │                                                                 │
     │     ┌─ GoldFalcon ──────────────────────── 10m ago ─┐          │
     │     │ Hey, starting on API endpoints                │          │
@@ -586,7 +742,7 @@ Visual guide to the internals of pi-messenger.
     │     └───────────────────────────────────────────────┘          │
     │                                                                 │
     │   ─────────────────────────────────────────────                 │
-    │   > Type message here...                [Tab] [Enter]← Input   │
+    │   > Type message here...                    [Tab] [Enter]       │
     │                                                                 │
     ╰─────────────────────────────────────────────────────────────────╯
 
@@ -595,27 +751,12 @@ Visual guide to the internals of pi-messenger.
     │                      KEYBOARD CONTROLS                        │
     ├───────────────────────────────────────────────────────────────┤
     │                                                               │
-    │   Tab / → / ←      Cycle between agent tabs                  │
+    │   Tab / → / ←      Cycle between tabs                        │
     │   ↑ / ↓            Scroll message history                    │
     │   Home / End       Jump to oldest / newest                   │
     │   Enter            Send message                              │
     │   Backspace        Delete character                          │
     │   Esc              Close overlay                             │
-    │                                                               │
-    └───────────────────────────────────────────────────────────────┘
-
-
-    ┌───────────────────────────────────────────────────────────────┐
-    │                      STATE MANAGEMENT                         │
-    ├───────────────────────────────────────────────────────────────┤
-    │                                                               │
-    │   selectedAgent     Currently selected tab (or null for All) │
-    │   inputText         Current input buffer                     │
-    │   scrollPosition    Messages scrolled from bottom (0=newest) │
-    │                                                               │
-    │   On tab switch:    Clear unread count, reset scroll         │
-    │   On send success:  Clear input, reset scroll                │
-    │   On send failure:  Keep input (retry possible)              │
     │                                                               │
     └───────────────────────────────────────────────────────────────┘
 ```
@@ -636,6 +777,7 @@ Visual guide to the internals of pi-messenger.
     │   agentName: string              "SwiftRaven"                  │
     │   registered: boolean            true                          │
     │   gitBranch: string | undefined  "main"                        │
+    │   spec: string | undefined       "/abs/path/to/spec.md"        │
     │   watcher: FSWatcher | null      <watching inbox>              │
     │   watcherRetries: number         0                             │
     │   watcherRetryTimer: Timer       null                          │
@@ -680,6 +822,7 @@ Visual guide to the internals of pi-messenger.
     │    "model": "claude-sonnet-4",                                 │
     │    "startedAt": "2026-01-20T10:30:00.000Z",                    │
     │    "gitBranch": "main",                                        │
+    │    "spec": "/Users/dev/project/spec.md",                       │
     │    "reservations": [                                           │
     │      {                                                         │
     │        "pattern": "src/auth/",                                 │
@@ -687,6 +830,64 @@ Visual guide to the internals of pi-messenger.
     │        "since": "2026-01-20T10:35:00.000Z"                     │
     │      }                                                         │
     │    ]                                                           │
+    │  }                                                             │
+    └────────────────────────────────────────────────────────────────┘
+
+
+    ClaimEntry                              In claims.json
+    ══════════                              ══════════════
+
+    ┌────────────────────────────────────────────────────────────────┐
+    │  {                                                             │
+    │    "agent": "SwiftRaven",                                      │
+    │    "sessionId": "abc-123",                                     │
+    │    "pid": 12345,                                               │
+    │    "claimedAt": "2026-01-20T10:45:00.000Z",                    │
+    │    "reason": "Implementing login flow"                         │
+    │  }                                                             │
+    └────────────────────────────────────────────────────────────────┘
+
+
+    CompletionEntry                         In completions.json
+    ═══════════════                         ═══════════════════
+
+    ┌────────────────────────────────────────────────────────────────┐
+    │  {                                                             │
+    │    "completedBy": "SwiftRaven",                                │
+    │    "completedAt": "2026-01-20T11:30:00.000Z",                  │
+    │    "notes": "Added JWT validation and refresh tokens"          │
+    │  }                                                             │
+    └────────────────────────────────────────────────────────────────┘
+
+
+    claims.json                             All active claims
+    ═══════════                             ═════════════════
+
+    ┌────────────────────────────────────────────────────────────────┐
+    │  {                                                             │
+    │    "/abs/path/to/auth-spec.md": {                              │
+    │      "TASK-01": { agent, sessionId, pid, claimedAt, reason },  │
+    │      "TASK-02": { agent, sessionId, pid, claimedAt }           │
+    │    },                                                          │
+    │    "/abs/path/to/api-spec.md": {                               │
+    │      "TASK-05": { agent, sessionId, pid, claimedAt, reason }   │
+    │    }                                                           │
+    │  }                                                             │
+    └────────────────────────────────────────────────────────────────┘
+
+
+    completions.json                        All completed tasks
+    ════════════════                        ════════════════════
+
+    ┌────────────────────────────────────────────────────────────────┐
+    │  {                                                             │
+    │    "/abs/path/to/auth-spec.md": {                              │
+    │      "TASK-00": { completedBy, completedAt, notes }            │
+    │    },                                                          │
+    │    "/abs/path/to/api-spec.md": {                               │
+    │      "TASK-01": { completedBy, completedAt, notes },           │
+    │      "TASK-02": { completedBy, completedAt }                   │
+    │    }                                                           │
     │  }                                                             │
     └────────────────────────────────────────────────────────────────┘
 
@@ -753,30 +954,6 @@ Visual guide to the internals of pi-messenger.
                     │  (regardless of       │
                     │   individual fails)   │
                     └───────────────────────┘
-
-
-    ════════════════════════════════════════════════════════════════════
-
-                      BROADCAST VS DIRECT MESSAGE
-
-    ════════════════════════════════════════════════════════════════════
-
-    ┌─────────────────────────────┬─────────────────────────────────────┐
-    │         DIRECT              │           BROADCAST                 │
-    ├─────────────────────────────┼─────────────────────────────────────┤
-    │                             │                                     │
-    │  to: "GoldFalcon"           │  broadcast: true                    │
-    │                             │                                     │
-    │  Validated before send      │  Best-effort to all                 │
-    │                             │                                     │
-    │  Failure = error returned   │  Individual failures ignored        │
-    │                             │                                     │
-    │  Stored in chatHistory      │  Stored in broadcastHistory         │
-    │  keyed by recipient         │  with to: "broadcast"               │
-    │                             │                                     │
-    │  Shows in recipient's tab   │  Shows in "+ All" tab               │
-    │                             │                                     │
-    └─────────────────────────────┴─────────────────────────────────────┘
 ```
 
 ## Name Generation
@@ -799,30 +976,9 @@ Visual guide to the internals of pi-messenger.
             │ Swift       │             │ Arrow       │
             │ Bright      │             │ Bear        │
             │ Calm        │             │ Castle      │
-            │ Dark        │             │ Dragon      │
-            │ Epic        │             │ Eagle       │
-            │ Fast        │             │ Falcon      │
-            │ Gold        │             │ Grove       │
-            │ Happy       │             │ Hawk        │
-            │ Iron        │             │ Ice         │
-            │ Jade        │             │ Jaguar      │
-            │ Keen        │             │ Knight      │
-            │ Loud        │             │ Lion        │
-            │ Mint        │             │ Moon        │
-            │ Nice        │             │ Nova        │
-            │ Oak         │             │ Owl         │
-            │ Pure        │             │ Phoenix     │
-            │ Quick       │             │ Quartz      │
-            │ Red         │             │ Raven       │
-            │ Sage        │             │ Storm       │
-            │ True        │             │ Tiger       │
-            │ Ultra       │             │ Union       │
-            │ Vivid       │             │ Viper       │
-            │ Wild        │             │ Wolf        │
-            │ Young       │             │ Xenon       │
-            │ Zen         │             │ Yak         │
-            └──────┬──────┘             │ Zenith      │
-                   │                    └──────┬──────┘
+            │ ...         │             │ ...         │
+            │ Zen         │             │ Zenith      │
+            └──────┬──────┘             └──────┬──────┘
                    │                           │
                    └───────────┬───────────────┘
                                │
@@ -840,93 +996,10 @@ Visual guide to the internals of pi-messenger.
                         │ SwiftRaven  │
                         │ GoldFalcon  │
                         │ IronKnight  │
-                        │ CalmBear    │
                         │    ...      │
                         └─────────────┘
 
                     25 × 26 = 650 possible combinations
-
-
-    ════════════════════════════════════════════════════════════════════
-
-                         NAME COLLISION HANDLING
-
-    ════════════════════════════════════════════════════════════════════
-
-                         findAvailableName("SwiftRaven")
-                                     │
-                                     ▼
-                    ┌────────────────────────────────┐
-                    │  SwiftRaven.json exists?       │
-                    └────────────────┬───────────────┘
-                                     │
-                          ┌──────────┴──────────┐
-                          │                     │
-                         No                    Yes
-                          │                     │
-                          ▼                     ▼
-                  Return "SwiftRaven"   Is PID alive?
-                                               │
-                                    ┌──────────┴──────────┐
-                                    │                     │
-                                   No                    Yes
-                                    │                     │
-                                    ▼                     ▼
-                            Return "SwiftRaven"   Try "SwiftRaven2"
-                            (overwrite stale)            │
-                                                         ▼
-                                                  Try "SwiftRaven3"
-                                                         │
-                                                         ▼
-                                                       ...
-                                                         │
-                                                         ▼
-                                                  Try "SwiftRaven99"
-                                                         │
-                                                         ▼
-                                                  Return null (give up)
-
-
-    ════════════════════════════════════════════════════════════════════
-
-                    REGISTRATION RACE CONDITION (v0.3.0)
-
-    ════════════════════════════════════════════════════════════════════
-
-      Two agents try to claim "SwiftRaven" simultaneously:
-
-         Agent A                                    Agent B
-            │                                          │
-            ▼                                          ▼
-    Check: available ◀───────────────────────▶ Check: available
-            │                                          │
-            ▼                                          ▼
-    Write SwiftRaven.json                      Write SwiftRaven.json
-            │                                          │  (overwrites A!)
-            ▼                                          ▼
-    Verify: read back ◀─────── B's PID ───────▶ Verify: read back
-            │                                          │
-            ▼                                          ▼
-    PID mismatch!                               PID matches!
-    (our write was                              SUCCESS
-     overwritten)                                  │
-            │                                      ▼
-            ▼                                  Agent B is
-    Retry with fresh                          "SwiftRaven"
-    findAvailableName()
-            │
-            ▼
-    Now sees "SwiftRaven"
-    is taken, returns
-    "SwiftRaven2"
-            │
-            ▼
-    Agent A becomes
-    "SwiftRaven2"
-
-
-    Auto-generated names: retry up to 3 times
-    Explicit names (PI_AGENT_NAME): fail with error
 ```
 
 ## Performance Optimizations
@@ -1006,50 +1079,8 @@ Visual guide to the internals of pi-messenger.
              │
              ▼
        (cancelled - never fires)
-
-
-    ┌─────────────────────────────────────────────────────────────────┐
-    │                  PROCESSING GUARD (v0.2.1)                      │
-    └─────────────────────────────────────────────────────────────────┘
-
-
-       Call 1                              Call 2 (while 1 running)
-          │                                       │
-          ▼                                       ▼
-    ┌───────────┐                          ┌───────────┐
-    │ Is        │                          │ Is        │
-    │ processing│ ─── No ───┐              │ processing│ ─── Yes ──┐
-    │ ?         │           │              │ ?         │           │
-    └───────────┘           │              └───────────┘           │
-                            ▼                                      ▼
-                   ┌─────────────────┐                   ┌─────────────────┐
-                   │ Set processing  │                   │ Store args in   │
-                   │ = true          │                   │ pendingProcessArgs
-                   └────────┬────────┘                   └────────┬────────┘
-                            │                                     │
-                            ▼                                     ▼
-                   ┌─────────────────┐                       (return)
-                   │ Process all     │
-                   │ messages        │
-                   └────────┬────────┘
-                            │
-                            ▼
-                   ┌─────────────────┐
-                   │ Set processing  │
-                   │ = false         │
-                   └────────┬────────┘
-                            │
-                            ▼
-                   ┌─────────────────┐
-                   │ Check pending?  │ ─── Yes ──▶ Re-run with stored args
-                   └────────┬────────┘
-                            │
-                           No
-                            │
-                            ▼
-                        (done)
 ```
 
 ---
 
-*These diagrams represent the architecture as of v0.3.0*
+*These diagrams represent the architecture as of v0.5.0*

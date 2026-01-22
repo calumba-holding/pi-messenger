@@ -14,12 +14,15 @@ import {
   extractFolder,
   truncatePathLeft,
   getDisplayMode,
+  displaySpecPath,
   type MessengerState,
   type Dirs,
   type AgentMailMessage,
   type AgentRegistration,
 } from "./lib.js";
 import * as store from "./store.js";
+
+const AGENTS_TAB = "[agents]";
 
 export class MessengerOverlay implements Component, Focusable {
   focused = false;
@@ -51,16 +54,24 @@ export class MessengerOverlay implements Component, Focusable {
     return this.cachedAgents;
   }
 
+  private hasAnySpec(agents: AgentRegistration[]): boolean {
+    if (this.state.spec) return true;
+    return agents.some(agent => agent.spec);
+  }
+
   private getMessages(): AgentMailMessage[] {
     if (this.selectedAgent === null) {
       return this.state.broadcastHistory;
+    }
+    if (this.selectedAgent === AGENTS_TAB) {
+      return [];
     }
     return this.state.chatHistory.get(this.selectedAgent) ?? [];
   }
 
   private selectTab(agentName: string | null): void {
     this.selectedAgent = agentName;
-    if (agentName) {
+    if (agentName && agentName !== AGENTS_TAB) {
       this.state.unreadCounts.set(agentName, 0);
     }
     this.scrollPosition = 0;
@@ -125,7 +136,7 @@ export class MessengerOverlay implements Component, Focusable {
     }
 
     if (matchesKey(data, "enter")) {
-      if (this.inputText.trim()) {
+      if (this.selectedAgent !== AGENTS_TAB && this.inputText.trim()) {
         this.sendMessage(agents);
       }
       return;
@@ -146,7 +157,7 @@ export class MessengerOverlay implements Component, Focusable {
   }
 
   private cycleTab(direction: number, agents: AgentRegistration[]): void {
-    const tabNames = [...agents.map(a => a.name), null];
+    const tabNames = [AGENTS_TAB, ...agents.map(a => a.name), null];
     const currentIdx = this.selectedAgent === null
       ? tabNames.length - 1
       : tabNames.indexOf(this.selectedAgent);
@@ -210,8 +221,9 @@ export class MessengerOverlay implements Component, Focusable {
     const totalHeight = Math.floor(this.tui.terminal.rows * 0.45);
     const agents = this.getAgentsSorted();
 
-    if (this.selectedAgent && !agents.find(a => a.name === this.selectedAgent)) {
+    if (this.selectedAgent && this.selectedAgent !== AGENTS_TAB && !agents.find(a => a.name === this.selectedAgent)) {
       this.selectedAgent = agents[0]?.name ?? null;
+      this.scrollPosition = 0;  // Reset scroll when auto-switching due to agent death
     }
 
     const lines: string[] = [];
@@ -247,7 +259,13 @@ export class MessengerOverlay implements Component, Focusable {
 
   private renderTabBar(width: number, agents: AgentRegistration[]): string {
     const parts: string[] = [];
+    const hasAnySpec = this.hasAnySpec(agents);
     const mode = getDisplayMode(agents);
+
+    const isAgentsSelected = this.selectedAgent === AGENTS_TAB;
+    let agentsTab = isAgentsSelected ? "▸ " : "";
+    agentsTab += this.theme.fg("accent", "Agents");
+    parts.push(agentsTab);
 
     for (const agent of agents) {
       const isSelected = this.selectedAgent === agent.name;
@@ -257,7 +275,12 @@ export class MessengerOverlay implements Component, Focusable {
       tab += "● ";
       tab += coloredAgentName(agent.name);
 
-      if (mode === "same-folder") {
+      if (hasAnySpec) {
+        if (agent.spec) {
+          const specLabel = truncatePathLeft(displaySpecPath(agent.spec, process.cwd()), 14);
+          tab += `:${specLabel}`;
+        }
+      } else if (mode === "same-folder") {
         if (agent.gitBranch) {
           tab += `:${agent.gitBranch}`;
         }
@@ -301,6 +324,10 @@ export class MessengerOverlay implements Component, Focusable {
   }
 
   private renderMessages(width: number, height: number, agents: AgentRegistration[]): string[] {
+    if (this.selectedAgent === AGENTS_TAB) {
+      return this.renderAgentsOverview(width, height, agents);
+    }
+
     const messages = this.getMessages();
 
     if (messages.length === 0) {
@@ -326,6 +353,98 @@ export class MessengerOverlay implements Component, Focusable {
       allRenderedLines.unshift("");
     }
     return allRenderedLines;
+  }
+
+  private renderAgentsOverview(width: number, height: number, agents: AgentRegistration[]): string[] {
+    const lines: string[] = [];
+    const hasAnySpec = this.hasAnySpec(agents);
+
+    if (hasAnySpec) {
+      const claims = store.getClaims(this.dirs);
+      const claimByAgent = new Map<string, { taskId: string; reason?: string }>();
+      for (const tasks of Object.values(claims)) {
+        for (const [taskId, claim] of Object.entries(tasks)) {
+          claimByAgent.set(claim.agent, { taskId, reason: claim.reason });
+        }
+      }
+
+      const entries: Array<{ name: string; spec?: string; isSelf: boolean }> = agents.map(agent => ({
+        name: agent.name,
+        spec: agent.spec,
+        isSelf: false
+      }));
+      entries.push({ name: this.state.agentName, spec: this.state.spec, isSelf: true });
+
+      const groups = new Map<string, Array<{ name: string; isSelf: boolean }>>();
+      for (const entry of entries) {
+        const key = entry.spec ? displaySpecPath(entry.spec, process.cwd()) : "No spec";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)?.push({ name: entry.name, isSelf: entry.isSelf });
+      }
+
+      const mySpec = this.state.spec ? displaySpecPath(this.state.spec, process.cwd()) : undefined;
+      const specKeys = Array.from(groups.keys()).filter(key => groups.get(key)?.length);
+      const ordered = specKeys
+        .filter(key => key !== "No spec" && key !== mySpec)
+        .sort((a, b) => a.localeCompare(b));
+      if (mySpec && groups.get(mySpec)) ordered.unshift(mySpec);
+      if (groups.get("No spec")?.length) ordered.push("No spec");
+
+      for (const spec of ordered) {
+        lines.push(`${spec}:`);
+        const group = (groups.get(spec) ?? []).sort((a, b) => {
+          if (a.isSelf && !b.isSelf) return -1;
+          if (!a.isSelf && b.isSelf) return 1;
+          return a.name.localeCompare(b.name);
+        });
+        for (const entry of group) {
+          const claim = claimByAgent.get(entry.name);
+          const nameLabel = entry.isSelf ? `${entry.name} (you)` : entry.name;
+          const taskLabel = claim ? claim.taskId : "(idle)";
+          const reasonLabel = claim?.reason ? truncateToWidth(claim.reason, 24) : "";
+          const row = `  ${nameLabel.padEnd(20)} ${taskLabel.padEnd(10)} ${reasonLabel}`;
+          lines.push(truncateToWidth(row, width));
+        }
+        lines.push("");
+      }
+    } else {
+      const mode = getDisplayMode(agents);
+      if (mode === "same-folder-branch") {
+        const folder = extractFolder(agents[0].cwd);
+        const branch = agents.find(a => a.gitBranch)?.gitBranch;
+        const header = branch ? `Peers in ${folder} (${branch}):` : `Peers in ${folder}:`;
+        lines.push(header, "");
+      } else if (mode === "same-folder") {
+        const folder = extractFolder(agents[0].cwd);
+        lines.push(`Peers in ${folder}:`, "");
+      } else {
+        lines.push("Peers:", "");
+      }
+
+      for (const agent of agents) {
+        const time = formatRelativeTime(agent.startedAt);
+        const branch = agent.gitBranch ?? "";
+        const folder = extractFolder(agent.cwd);
+        if (mode === "same-folder-branch") {
+          lines.push(`  ${agent.name.padEnd(14)} ${agent.model.padEnd(20)} ${time}`);
+        } else if (mode === "same-folder") {
+          lines.push(`  ${agent.name.padEnd(14)} ${branch.padEnd(12)} ${agent.model.padEnd(20)} ${time}`);
+        } else {
+          lines.push(`  ${agent.name.padEnd(14)} ${folder.padEnd(20)} ${branch.padEnd(12)} ${agent.model.padEnd(20)} ${time}`);
+        }
+        if (agent.reservations && agent.reservations.length > 0) {
+          for (const r of agent.reservations) {
+            lines.push(`                 🔒 ${truncatePathLeft(r.pattern, 40)}`);
+          }
+        }
+      }
+    }
+
+    if (lines.length > height) {
+      return lines.slice(0, height);
+    }
+    while (lines.length < height) lines.push("");
+    return lines;
   }
 
   private renderNoMessages(width: number, height: number, agents: AgentRegistration[]): string[] {
@@ -450,7 +569,9 @@ export class MessengerOverlay implements Component, Focusable {
     const prompt = this.theme.fg("accent", "> ");
 
     let placeholder: string;
-    if (this.selectedAgent === null) {
+    if (this.selectedAgent === AGENTS_TAB) {
+      placeholder = "Agents overview";
+    } else if (this.selectedAgent === null) {
       placeholder = "Broadcast to all agents...";
     } else {
       placeholder = `Message ${this.selectedAgent}...`;

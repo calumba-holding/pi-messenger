@@ -19,6 +19,7 @@ import {
   formatRelativeTime,
   stripAnsiCodes,
   extractFolder,
+  displaySpecPath,
 } from "./lib.js";
 import * as store from "./store.js";
 import * as handlers from "./handlers.js";
@@ -46,7 +47,8 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     unreadCounts: new Map(),
     broadcastHistory: [],
     seenSenders: new Map(),
-    gitBranch: undefined
+    gitBranch: undefined,
+    spec: undefined
   };
 
   const baseDir = process.env.PI_MESSENGER_DIR || join(homedir(), ".pi/agent/messenger");
@@ -157,9 +159,16 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     description: `Communicate with other pi agents and manage file reservations.
 
 Usage:
-  pi_messenger({ join: true })                   → Join the agent mesh (required before other operations)
-  pi_messenger({ })                              → Status (your name, peers, your reservations)
-  pi_messenger({ list: true })                   → List other agents with their reservations
+  pi_messenger({ join: true })                   → Join the agent mesh
+  pi_messenger({ join: true, spec: "path" })     → Join and set working spec
+  pi_messenger({ })                              → Status (your name, peers, spec, claim)
+  pi_messenger({ list: true })                   → List agents with specs/claims
+  pi_messenger({ swarm: true })                  → All specs' claims/completions
+  pi_messenger({ swarm: true, spec: "path" })    → One spec's claims/completions
+  pi_messenger({ claim: "TASK-01" })             → Claim a task in your spec
+  pi_messenger({ complete: "TASK-01", notes: "..." }) → Mark task complete
+  pi_messenger({ unclaim: "TASK-01" })           → Release claim without completing
+  pi_messenger({ spec: "path" })                 → Set/change your working spec
   pi_messenger({ to: "Name", message: "hi" })    → Send message to one agent
   pi_messenger({ to: ["A", "B"], message: "..." })  → Send to multiple agents
   pi_messenger({ broadcast: true, message: "..." }) → Send to ALL active agents
@@ -168,9 +177,15 @@ Usage:
   pi_messenger({ release: true })                → Release all your reservations
   pi_messenger({ rename: "NewName" })            → Rename yourself
 
-Mode: join > to/broadcast (send) > reserve > release > rename > list > status`,
+Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > reserve > release > rename > list > status`,
     parameters: Type.Object({
       join: Type.Optional(Type.Boolean({ description: "Join the agent mesh" })),
+      spec: Type.Optional(Type.String({ description: "Path to spec/plan file" })),
+      claim: Type.Optional(Type.String({ description: "Task ID to claim" })),
+      unclaim: Type.Optional(Type.String({ description: "Task ID to release" })),
+      complete: Type.Optional(Type.String({ description: "Task ID to mark complete" })),
+      notes: Type.Optional(Type.String({ description: "Completion notes" })),
+      swarm: Type.Optional(Type.Boolean({ description: "Get swarm status" })),
       to: Type.Optional(Type.Union([
         Type.String({ description: "Target agent name" }),
         Type.Array(Type.String(), { description: "Multiple target agent names" })
@@ -190,6 +205,12 @@ Mode: join > to/broadcast (send) > reserve > release > rename > list > status`,
 
     async execute(_toolCallId, params: {
       join?: boolean;
+      spec?: string;
+      claim?: string;
+      unclaim?: string;
+      complete?: string;
+      notes?: string;
+      swarm?: boolean;
       to?: string | string[];
       broadcast?: boolean;
       message?: string;
@@ -200,11 +221,28 @@ Mode: join > to/broadcast (send) > reserve > release > rename > list > status`,
       rename?: string;
       list?: boolean;
     }, _onUpdate, ctx, _signal) {
-      const { join, to, broadcast, message, replyTo, reserve, reason, release, rename, list } = params;
+      const {
+        join,
+        spec,
+        claim,
+        unclaim,
+        complete,
+        notes,
+        swarm,
+        to,
+        broadcast,
+        message,
+        replyTo,
+        reserve,
+        reason,
+        release,
+        rename,
+        list
+      } = params;
 
       // Join doesn't require registration
       if (join) {
-        const joinResult = handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus);
+        const joinResult = handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, spec);
         
         // Send registration context after successful join (if configured)
         if (state.registered && config.registrationContext) {
@@ -212,8 +250,10 @@ Mode: join > to/broadcast (send) > reserve > release > rename > list > status`,
           const locationPart = state.gitBranch
             ? `${folder} on ${state.gitBranch}`
             : folder;
+          const specPart = state.spec ? ` working on ${displaySpecPath(state.spec, process.cwd())}` : "";
           pi.sendMessage({
-            content: `You are agent "${state.agentName}" in ${locationPart}. Other agents working on this or related codebases may send you coordination messages. Use pi_messenger({ to: "Name", message: "..." }) to reply, pi_messenger({ list: true }) to see active peers, or /messenger to open the chat overlay.`,
+            customType: "messenger_context",
+            content: `You are agent "${state.agentName}" in ${locationPart}${specPart}. Use pi_messenger({ swarm: true }) to see task status, pi_messenger({ claim: "TASK-X" }) to claim tasks.`,
             display: false
           }, { triggerTurn: false });
         }
@@ -224,6 +264,11 @@ Mode: join > to/broadcast (send) > reserve > release > rename > list > status`,
       // All other operations require registration
       if (!state.registered) return handlers.notRegisteredError();
 
+      if (swarm) return handlers.executeSwarm(state, dirs, spec);
+      if (claim) return await handlers.executeClaim(state, dirs, ctx, claim, spec, reason);
+      if (unclaim) return await handlers.executeUnclaim(state, dirs, unclaim, spec);
+      if (complete) return await handlers.executeComplete(state, dirs, complete, notes, spec);
+      if (spec) return handlers.executeSetSpec(state, dirs, ctx, spec);
       if (to || broadcast) return handlers.executeSend(state, dirs, to, broadcast, message, replyTo);
       if (reserve && reserve.length > 0) return handlers.executeReserve(state, dirs, ctx, reserve, reason);
       if (release === true || (Array.isArray(release) && release.length > 0)) {
@@ -324,8 +369,10 @@ Mode: join > to/broadcast (send) > reserve > release > rename > list > status`,
         const locationPart = state.gitBranch
           ? `${folder} on ${state.gitBranch}`
           : folder;
+        const specPart = state.spec ? ` working on ${displaySpecPath(state.spec, process.cwd())}` : "";
         pi.sendMessage({
-          content: `You are agent "${state.agentName}" in ${locationPart}. Other agents working on this or related codebases may send you coordination messages. Use pi_messenger({ to: "Name", message: "..." }) to reply, pi_messenger({ list: true }) to see active peers, or /messenger to open the chat overlay.`,
+          customType: "messenger_context",
+          content: `You are agent "${state.agentName}" in ${locationPart}${specPart}. Use pi_messenger({ swarm: true }) to see task status, pi_messenger({ claim: "TASK-X" }) to claim tasks.`,
           display: false
         }, { triggerTurn: false });
       }
@@ -375,13 +422,10 @@ Mode: join > to/broadcast (send) > reserve > release > rename > list > status`,
     if (conflicts.length === 0) return;
 
     const c = conflicts[0];
-    const agent = store.getActiveAgents(state, dirs).find(a => a.name === c.agent);
-    const folder = agent ? extractFolder(agent.cwd) : undefined;
-    const locationPart = folder
-      ? agent?.gitBranch
-        ? ` (in ${folder} on ${agent.gitBranch})`
-        : ` (in ${folder})`
-      : "";
+    const folder = extractFolder(c.registration.cwd);
+    const locationPart = c.registration.gitBranch
+      ? ` (in ${folder} on ${c.registration.gitBranch})`
+      : ` (in ${folder})`;
 
     const lines = [path, `Reserved by: ${c.agent}${locationPart}`];
     if (c.reason) lines.push(`Reason: "${c.reason}"`);

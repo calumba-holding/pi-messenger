@@ -3,7 +3,7 @@
  */
 
 import type * as fs from "node:fs";
-import { basename } from "node:path";
+import { basename, isAbsolute, resolve, relative } from "node:path";
 
 // =============================================================================
 // Types
@@ -24,6 +24,7 @@ export interface AgentRegistration {
   startedAt: string;
   reservations?: FileReservation[];
   gitBranch?: string;
+  spec?: string;
 }
 
 export interface AgentMailMessage {
@@ -40,6 +41,7 @@ export interface ReservationConflict {
   agent: string;
   pattern: string;
   reason?: string;
+  registration: AgentRegistration;
 }
 
 export interface MessengerState {
@@ -55,6 +57,7 @@ export interface MessengerState {
   broadcastHistory: AgentMailMessage[];
   seenSenders: Map<string, string>;  // name -> sessionId (detects agent restarts)
   gitBranch?: string;
+  spec?: string;
 }
 
 export interface Dirs {
@@ -62,6 +65,25 @@ export interface Dirs {
   registry: string;
   inbox: string;
 }
+
+export interface ClaimEntry {
+  agent: string;
+  sessionId: string;
+  pid: number;
+  claimedAt: string;
+  reason?: string;
+}
+
+export interface CompletionEntry {
+  completedBy: string;
+  completedAt: string;
+  notes?: string;
+}
+
+export type SpecClaims = Record<string, ClaimEntry>;
+export type SpecCompletions = Record<string, CompletionEntry>;
+export type AllClaims = Record<string, SpecClaims>;
+export type AllCompletions = Record<string, SpecCompletions>;
 
 // =============================================================================
 // Constants
@@ -159,6 +181,24 @@ export function coloredAgentName(name: string): string {
 
 export function extractFolder(cwd: string): string {
   return basename(cwd) || cwd;
+}
+
+export function resolveSpecPath(specPath: string, cwd: string): string {
+  if (isAbsolute(specPath)) return specPath;
+  return resolve(cwd, specPath);
+}
+
+export function displaySpecPath(absPath: string, cwd: string): string {
+  try {
+    const rel = relative(cwd, absPath);
+    if (rel === "") return ".";
+    if (!rel.startsWith("..") && !isAbsolute(rel)) {
+      return "./" + rel;
+    }
+  } catch {
+    // Ignore and fall back to absolute
+  }
+  return absPath;
 }
 
 export function truncatePathLeft(filePath: string, maxLen: number): string {

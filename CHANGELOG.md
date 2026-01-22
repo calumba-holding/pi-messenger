@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.5.0 - 2026-01-20
+
+### Added
+
+- **Swarm coordination** - Agents can now coordinate on shared spec files with atomic task claiming
+- **Spec registration** - `pi_messenger({ spec: "path/to/spec.md" })` registers your working spec
+- **Task claiming** - `pi_messenger({ claim: "TASK-01" })` atomically claims a task in your spec
+- **Task completion** - `pi_messenger({ complete: "TASK-01", notes: "..." })` marks tasks done with notes
+- **Task unclaiming** - `pi_messenger({ unclaim: "TASK-01" })` releases a claim without completing
+- **Swarm status** - `pi_messenger({ swarm: true })` shows all agents' claims and completions
+- **Spec-scoped swarm** - `pi_messenger({ swarm: true, spec: "path" })` shows status for one spec only
+- **Join with spec** - `pi_messenger({ join: true, spec: "path" })` joins and registers spec atomically
+- **Single-claim-per-agent rule** - Must complete or unclaim before claiming another task
+- **Stale claim cleanup** - Claims from dead agents (PID gone + lock >10s old) are automatically cleaned
+
+### Changed
+
+- **Agents tab in overlay** - Now groups agents by spec with claims displayed
+- **Status output** - Now includes current spec and active claim when set
+- **List output** - Now shows spec and claim status for each agent
+
+### Storage
+
+New files in `~/.pi/agent/messenger/`:
+- `claims.json` - Active task claims by spec
+- `completions.json` - Completed tasks by spec
+- `swarm.lock` - Atomic lock for claim/complete mutations
+
+### Fixed
+
+- **Safe completion write order** - Completions are now written before claims removal, so if the second write fails the task completion is still recorded
+- **Overlay scroll reset on agent death** - When an agent dies and the overlay auto-switches to another tab, scroll position is now properly reset
+- **Type-safe result handling** - Added proper type guards (`isClaimSuccess`, `isUnclaimNotYours`, etc.) for discriminated union result types, replacing fragile `as` casts
+- **I/O error cleanup** - If registration write succeeds but read-back fails (extremely rare I/O error), the orphaned file is now cleaned up
+- **Single agent lookup for reservations** - `ReservationConflict` now includes full agent registration, eliminating redundant disk reads when blocking reserved files
+
 ## 0.4.0 - 2026-01-21
 
 ### Changed

@@ -2,16 +2,21 @@
  * Pi Messenger - Tool and Command Handlers
  */
 
+import { existsSync } from "node:fs";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import {
   type MessengerState,
   type Dirs,
   type AgentMailMessage,
   type AgentRegistration,
+  type SpecClaims,
+  type SpecCompletions,
   formatRelativeTime,
   extractFolder,
   truncatePathLeft,
-  getDisplayMode
+  getDisplayMode,
+  displaySpecPath,
+  resolveSpecPath
 } from "./lib.js";
 import * as store from "./store.js";
 
@@ -46,7 +51,8 @@ export function executeJoin(
   dirs: Dirs,
   ctx: ExtensionContext,
   deliverFn: (msg: AgentMailMessage) => void,
-  updateStatusFn: (ctx: ExtensionContext) => void
+  updateStatusFn: (ctx: ExtensionContext) => void,
+  specPath?: string
 ) {
   if (state.registered) {
     const agents = store.getActiveAgents(state, dirs);
@@ -66,15 +72,32 @@ export function executeJoin(
   store.startWatcher(state, dirs, deliverFn);
   updateStatusFn(ctx);
 
+  let specWarning = "";
+  if (specPath) {
+    state.spec = resolveSpecPath(specPath, process.cwd());
+    store.updateRegistration(state, dirs, ctx);
+    if (!existsSync(state.spec)) {
+      specWarning = `\n\nWarning: Spec file not found at ${displaySpecPath(state.spec, process.cwd())}.`;
+    }
+  }
+
   const agents = store.getActiveAgents(state, dirs);
   const folder = extractFolder(process.cwd());
   const locationPart = state.gitBranch ? `${folder} on ${state.gitBranch}` : folder;
 
   let text = `Joined as ${state.agentName} in ${locationPart}. ${agents.length} peer${agents.length === 1 ? "" : "s"} active.`;
-  
+
+  if (state.spec) {
+    text += `\nSpec: ${displaySpecPath(state.spec, process.cwd())}`;
+  }
+
   if (agents.length > 0) {
     text += `\n\nActive peers: ${agents.map(a => a.name).join(", ")}`;
     text += `\n\nUse pi_messenger({ list: true }) for details, or pi_messenger({ to: "Name", message: "..." }) to send.`;
+  }
+
+  if (specWarning) {
+    text += specWarning;
   }
 
   return result(text, {
@@ -82,7 +105,8 @@ export function executeJoin(
     name: state.agentName,
     location: locationPart,
     peerCount: agents.length,
-    peers: agents.map(a => a.name)
+    peers: agents.map(a => a.name),
+    spec: state.spec ? displaySpecPath(state.spec, process.cwd()) : undefined
   });
 }
 
@@ -94,15 +118,25 @@ export function executeStatus(state: MessengerState, dirs: Dirs) {
   const agents = store.getActiveAgents(state, dirs);
   const folder = extractFolder(process.cwd());
   const location = state.gitBranch ? `${folder} (${state.gitBranch})` : folder;
+  const myClaim = store.getAgentCurrentClaim(dirs, state.agentName);
 
   let text = `You: ${state.agentName}\n`;
   text += `Location: ${location}\n`;
+
+  if (state.spec) {
+    const specDisplay = displaySpecPath(state.spec, process.cwd());
+    text += `Spec: ${specDisplay}\n`;
+    if (myClaim) {
+      text += `Claim: ${myClaim.taskId}${myClaim.reason ? ` - ${myClaim.reason}` : ""}\n`;
+    }
+  }
+
   text += `Peers: ${agents.length}\n`;
   if (state.reservations.length > 0) {
     const myRes = state.reservations.map(r => `🔒 ${truncatePathLeft(r.pattern, 40)}`);
     text += `Reservations: ${myRes.join(", ")}\n`;
   }
-  text += `\nUse { list: true } to see other agents, { to: "Name", message: "..." } to send.`;
+  text += `\nUse { list: true } for details, { swarm: true } for task status.`;
 
   return result(text, {
     mode: "status",
@@ -111,6 +145,13 @@ export function executeStatus(state: MessengerState, dirs: Dirs) {
     folder,
     gitBranch: state.gitBranch,
     peerCount: agents.length,
+    spec: state.spec ? displaySpecPath(state.spec, process.cwd()) : undefined,
+    claim: myClaim
+      ? {
+        ...myClaim,
+        spec: displaySpecPath(myClaim.spec, process.cwd())
+      }
+      : undefined,
     reservations: state.reservations
   });
 }
@@ -125,60 +166,101 @@ export function executeList(state: MessengerState, dirs: Dirs) {
   if (agents.length === 0) {
     return result(
       "No other agents currently active.",
-      { mode: "list", registered: true, agents: [], self: state.agentName }
+      { mode: "list", registered: true, agents: [], self: state.agentName, agentClaims: {} }
     );
   }
 
-  const mode = getDisplayMode(agents);
   const lines: string[] = [];
+  const hasAnySpec = !!state.spec || agents.some(a => a.spec);
+  const allClaims = store.getClaims(dirs);
+  const agentClaims: Record<string, { spec: string; taskId: string; reason?: string }> = {};
+
+  for (const [specPath, tasks] of Object.entries(allClaims)) {
+    for (const [taskId, claim] of Object.entries(tasks)) {
+      if (claim.agent !== state.agentName) {
+        agentClaims[claim.agent] = {
+          spec: displaySpecPath(specPath, process.cwd()),
+          taskId,
+          reason: claim.reason
+        };
+      }
+    }
+  }
 
   function formatReservations(a: AgentRegistration): string[] {
     if (!a.reservations || a.reservations.length === 0) return [];
     return a.reservations.map(r => `🔒 ${truncatePathLeft(r.pattern, 40)}`);
   }
 
-  if (mode === "same-folder-branch") {
-    const folder = extractFolder(agents[0].cwd);
-    const branch = agents.find(a => a.gitBranch)?.gitBranch;
-    const header = branch ? `Peers in ${folder} (${branch}):` : `Peers in ${folder}:`;
-    lines.push(header, "");
-
+  if (hasAnySpec) {
+    const bySpec: Record<string, AgentRegistration[]> = { "No spec": [] };
     for (const a of agents) {
-      const time = formatRelativeTime(a.startedAt);
-      lines.push(`  ${a.name.padEnd(14)} ${a.model.padEnd(20)} ${time}`);
-      for (const res of formatReservations(a)) {
-        lines.push(`                 ${res}`);
-      }
+      const key = a.spec ? displaySpecPath(a.spec, process.cwd()) : "No spec";
+      if (!bySpec[key]) bySpec[key] = [];
+      bySpec[key].push(a);
     }
-  } else if (mode === "same-folder") {
-    const folder = extractFolder(agents[0].cwd);
-    lines.push(`Peers in ${folder}:`, "");
 
-    for (const a of agents) {
-      const branch = a.gitBranch ?? "";
-      const time = formatRelativeTime(a.startedAt);
-      lines.push(`  ${a.name.padEnd(14)} ${branch.padEnd(12)} ${a.model.padEnd(20)} ${time}`);
-      for (const res of formatReservations(a)) {
-        lines.push(`                 ${res}`);
+    const specKeys = Object.keys(bySpec).filter(key => bySpec[key].length > 0);
+    const sortedKeys = specKeys
+      .filter(key => key !== "No spec")
+      .sort((a, b) => a.localeCompare(b));
+    if (bySpec["No spec"].length > 0) sortedKeys.push("No spec");
+
+    for (const spec of sortedKeys) {
+      lines.push(`${spec}:`);
+      for (const a of bySpec[spec]) {
+        const claim = agentClaims[a.name];
+        const claimStr = claim ? claim.taskId : "(idle)";
+        const time = formatRelativeTime(a.startedAt);
+        lines.push(`  ${a.name.padEnd(14)} ${claimStr.padEnd(10)} ${a.model.padEnd(18)} ${time}`);
       }
+      lines.push("");
     }
   } else {
-    lines.push("Peers:", "");
+    const mode = getDisplayMode(agents);
+    if (mode === "same-folder-branch") {
+      const folder = extractFolder(agents[0].cwd);
+      const branch = agents.find(a => a.gitBranch)?.gitBranch;
+      const header = branch ? `Peers in ${folder} (${branch}):` : `Peers in ${folder}:`;
+      lines.push(header, "");
 
-    for (const a of agents) {
-      const folder = extractFolder(a.cwd);
-      const branch = a.gitBranch ?? "";
-      const time = formatRelativeTime(a.startedAt);
-      lines.push(`  ${a.name.padEnd(14)} ${folder.padEnd(20)} ${branch.padEnd(12)} ${a.model.padEnd(20)} ${time}`);
-      for (const res of formatReservations(a)) {
-        lines.push(`                 ${res}`);
+      for (const a of agents) {
+        const time = formatRelativeTime(a.startedAt);
+        lines.push(`  ${a.name.padEnd(14)} ${a.model.padEnd(20)} ${time}`);
+        for (const res of formatReservations(a)) {
+          lines.push(`                 ${res}`);
+        }
+      }
+    } else if (mode === "same-folder") {
+      const folder = extractFolder(agents[0].cwd);
+      lines.push(`Peers in ${folder}:`, "");
+
+      for (const a of agents) {
+        const branch = a.gitBranch ?? "";
+        const time = formatRelativeTime(a.startedAt);
+        lines.push(`  ${a.name.padEnd(14)} ${branch.padEnd(12)} ${a.model.padEnd(20)} ${time}`);
+        for (const res of formatReservations(a)) {
+          lines.push(`                 ${res}`);
+        }
+      }
+    } else {
+      lines.push("Peers:", "");
+
+      for (const a of agents) {
+        const folder = extractFolder(a.cwd);
+        const branch = a.gitBranch ?? "";
+        const time = formatRelativeTime(a.startedAt);
+        lines.push(`  ${a.name.padEnd(14)} ${folder.padEnd(20)} ${branch.padEnd(12)} ${a.model.padEnd(20)} ${time}`);
+        for (const res of formatReservations(a)) {
+          lines.push(`                 ${res}`);
+        }
       }
     }
   }
 
   return result(
-    lines.join("\n"),
-    { mode: "list", registered: true, agents, self: state.agentName }
+    lines.join("\n").trim(),
+    { mode: "list", registered: true, agents, self: state.agentName, agentClaims }
   );
 }
 
@@ -373,4 +455,267 @@ export function executeRename(
   );
 }
 
+export function executeSetSpec(
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+  specPath: string
+) {
+  const absPath = resolveSpecPath(specPath, process.cwd());
+  state.spec = absPath;
+  store.updateRegistration(state, dirs, ctx);
+  const display = displaySpecPath(absPath, process.cwd());
+  const warning = existsSync(absPath) ? "" : `\n\nWarning: Spec file not found at ${display}.`;
+  return result(`Spec set to ${display}${warning}`, { mode: "spec", spec: display });
+}
+
+export async function executeClaim(
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+  taskId: string,
+  specPath?: string,
+  reason?: string
+) {
+  const spec = specPath ? resolveSpecPath(specPath, process.cwd()) : state.spec;
+  if (!spec) {
+    return result(
+      "Error: No spec registered. Use `spec` parameter or join with a spec first.",
+      { mode: "claim", error: "no_spec" }
+    );
+  }
+
+  const warning = specPath && !existsSync(spec)
+    ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, process.cwd())}.`
+    : "";
+
+  const claimResult = await store.claimTask(
+    dirs,
+    spec,
+    taskId,
+    state.agentName,
+    ctx.sessionManager.getSessionId(),
+    process.pid,
+    reason
+  );
+
+  const display = displaySpecPath(spec, process.cwd());
+  if (store.isClaimSuccess(claimResult)) {
+    return result(`Claimed ${taskId} in ${display}${warning}`, {
+      mode: "claim",
+      spec: display,
+      taskId,
+      claimedAt: claimResult.claimedAt,
+      reason
+    });
+  }
+
+  if (store.isClaimAlreadyHaveClaim(claimResult)) {
+    const existingDisplay = displaySpecPath(claimResult.existing.spec, process.cwd());
+    return result(
+      `Error: You already have a claim on ${claimResult.existing.taskId} in ${existingDisplay}. Complete or unclaim it first.${warning}`,
+      {
+        mode: "claim",
+        error: "already_have_claim",
+        existing: { spec: existingDisplay, taskId: claimResult.existing.taskId }
+      }
+    );
+  }
+
+  // isClaimAlreadyClaimed
+  return result(
+    `Error: ${taskId} is already claimed by ${claimResult.conflict.agent}.${warning}`,
+    { mode: "claim", error: "already_claimed", taskId, conflict: claimResult.conflict }
+  );
+}
+
+export async function executeUnclaim(
+  state: MessengerState,
+  dirs: Dirs,
+  taskId: string,
+  specPath?: string
+) {
+  const spec = specPath ? resolveSpecPath(specPath, process.cwd()) : state.spec;
+  if (!spec) {
+    return result("Error: No spec registered.", { mode: "unclaim", error: "no_spec" });
+  }
+
+  const warning = specPath && !existsSync(spec)
+    ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, process.cwd())}.`
+    : "";
+
+  const unclaimResult = await store.unclaimTask(dirs, spec, taskId, state.agentName);
+  const display = displaySpecPath(spec, process.cwd());
+
+  if (store.isUnclaimSuccess(unclaimResult)) {
+    return result(`Released claim on ${taskId}${warning}`, { mode: "unclaim", spec: display, taskId });
+  }
+
+  if (store.isUnclaimNotYours(unclaimResult)) {
+    return result(
+      `Error: ${taskId} is claimed by ${unclaimResult.claimedBy}, not you.${warning}`,
+      { mode: "unclaim", error: "not_your_claim", taskId, claimedBy: unclaimResult.claimedBy }
+    );
+  }
+
+  // error === "not_claimed"
+  return result(`Error: ${taskId} is not claimed.${warning}`, { mode: "unclaim", error: "not_claimed", taskId });
+}
+
+export async function executeComplete(
+  state: MessengerState,
+  dirs: Dirs,
+  taskId: string,
+  notes?: string,
+  specPath?: string
+) {
+  const spec = specPath ? resolveSpecPath(specPath, process.cwd()) : state.spec;
+  if (!spec) {
+    return result("Error: No spec registered.", { mode: "complete", error: "no_spec" });
+  }
+
+  const warning = specPath && !existsSync(spec)
+    ? `\n\nWarning: Spec file not found at ${displaySpecPath(spec, process.cwd())}.`
+    : "";
+
+  const completeResult = await store.completeTask(dirs, spec, taskId, state.agentName, notes);
+  const display = displaySpecPath(spec, process.cwd());
+
+  if (store.isCompleteSuccess(completeResult)) {
+    return result(`Completed ${taskId} in ${display}${warning}`, {
+      mode: "complete",
+      spec: display,
+      taskId,
+      completedAt: completeResult.completedAt
+    });
+  }
+
+  if (store.isCompleteAlreadyCompleted(completeResult)) {
+    return result(
+      `Error: ${taskId} was already completed by ${completeResult.completion.completedBy}.${warning}`,
+      { mode: "complete", error: "already_completed", taskId, completion: completeResult.completion }
+    );
+  }
+
+  if (store.isCompleteNotYours(completeResult)) {
+    return result(
+      `Error: ${taskId} is claimed by ${completeResult.claimedBy}, not you.${warning}`,
+      { mode: "complete", error: "not_your_claim", taskId, claimedBy: completeResult.claimedBy }
+    );
+  }
+
+  // error === "not_claimed"
+  return result(`Error: ${taskId} is not claimed.${warning}`, { mode: "complete", error: "not_claimed", taskId });
+}
+
+export function executeSwarm(
+  state: MessengerState,
+  dirs: Dirs,
+  specPath?: string
+) {
+  const claims = store.getClaims(dirs);
+  const completions = store.getCompletions(dirs);
+  const agents = store.getActiveAgents(state, dirs);
+  const cwd = process.cwd();
+
+  const absByDisplay = new Map<string, string>();
+  const addAbs = (abs: string) => {
+    const display = displaySpecPath(abs, cwd);
+    if (!absByDisplay.has(display)) absByDisplay.set(display, abs);
+  };
+
+  for (const abs of Object.keys(claims)) addAbs(abs);
+  for (const abs of Object.keys(completions)) addAbs(abs);
+  if (state.spec) addAbs(state.spec);
+  for (const agent of agents) {
+    if (agent.spec) addAbs(agent.spec);
+  }
+
+  const specAgents: Record<string, string[]> = {};
+  if (state.spec) {
+    const display = displaySpecPath(state.spec, cwd);
+    specAgents[display] = [state.agentName];
+  }
+  for (const agent of agents) {
+    if (!agent.spec) continue;
+    const display = displaySpecPath(agent.spec, cwd);
+    if (!specAgents[display]) specAgents[display] = [];
+    specAgents[display].push(agent.name);
+  }
+
+  const myClaim = store.getAgentCurrentClaim(dirs, state.agentName);
+  const mySpec = state.spec ? displaySpecPath(state.spec, cwd) : undefined;
+
+  if (specPath) {
+    const absSpec = resolveSpecPath(specPath, cwd);
+    const display = displaySpecPath(absSpec, cwd);
+    const warning = !existsSync(absSpec)
+      ? `\n\nWarning: Spec file not found at ${display}.`
+      : "";
+    const specClaims: SpecClaims = claims[absSpec] || {};
+    const specCompletions: SpecCompletions = completions[absSpec] || {};
+    const specAgentList = specAgents[display] || [];
+
+    const lines = [`Swarm: ${display}`, ""];
+    const completedIds = Object.keys(specCompletions);
+    lines.push(`Completed: ${completedIds.length > 0 ? completedIds.join(", ") : "(none)"}`);
+
+    const inProgress = Object.entries(specClaims).map(([tid, c]) =>
+      `${tid} (${c.agent === state.agentName ? "you" : c.agent})`
+    );
+    lines.push(`In progress: ${inProgress.length > 0 ? inProgress.join(", ") : "(none)"}`);
+
+    const teammates = specAgentList.filter(name => name !== state.agentName);
+    if (teammates.length > 0) lines.push(`Teammates: ${teammates.join(", ")}`);
+
+    return result(lines.join("\n") + warning, {
+      mode: "swarm",
+      spec: display,
+      agents: specAgentList,
+      claims: specClaims,
+      completions: specCompletions
+    });
+  }
+
+  const allSpecs = new Set<string>([
+    ...absByDisplay.keys(),
+    ...Object.keys(specAgents)
+  ]);
+
+  const lines = ["Swarm Status:", ""];
+  const specsData: Record<string, { agents: string[]; claims: SpecClaims; completions: SpecCompletions }> = {};
+
+  for (const display of Array.from(allSpecs).sort((a, b) => a.localeCompare(b))) {
+    const absSpec = absByDisplay.get(display) ?? resolveSpecPath(display, cwd);
+    const specClaims: SpecClaims = claims[absSpec] || {};
+    const specCompletions: SpecCompletions = completions[absSpec] || {};
+    const specAgentList = specAgents[display] || [];
+
+    specsData[display] = { agents: specAgentList, claims: specClaims, completions: specCompletions };
+
+    const isMySpec = display === mySpec;
+    lines.push(`${display}${isMySpec ? " (your spec)" : ""}:`);
+
+    const completedIds = Object.keys(specCompletions);
+    lines.push(`  Completed: ${completedIds.length > 0 ? completedIds.join(", ") : "(none)"}`);
+
+    const inProgress = Object.entries(specClaims).map(([tid, c]) =>
+      `${tid} (${c.agent === state.agentName ? "you" : c.agent})`
+    );
+    lines.push(`  In progress: ${inProgress.length > 0 ? inProgress.join(", ") : "(none)"}`);
+
+    const idle = specAgentList.filter(name =>
+      !Object.values(specClaims).some(c => c.agent === name)
+    );
+    if (idle.length > 0) lines.push(`  Idle: ${idle.join(", ")}`);
+    lines.push("");
+  }
+
+  return result(lines.join("\n").trim(), {
+    mode: "swarm",
+    yourSpec: mySpec,
+    yourClaim: myClaim?.taskId,
+    specs: specsData
+  });
+}
 
