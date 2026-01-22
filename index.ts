@@ -312,15 +312,7 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
           (tui, theme, _keybindings, done) => {
             return new MessengerConfigOverlay(tui, theme, done);
           },
-          {
-            overlay: true,
-            overlayOptions: {
-              width: "60%",
-              maxHeight: "50%",
-              anchor: "center",
-              margin: 1,
-            },
-          }
+          { overlay: true }
         );
         return;
       }
@@ -340,15 +332,7 @@ Mode: join > swarm > claim > unclaim > complete > spec > to/broadcast (send) > r
           overlayTui = tui;
           return new MessengerOverlay(tui, theme, state, dirs, done);
         },
-        {
-          overlay: true,
-          overlayOptions: {
-            width: "80%",
-            maxHeight: "45%",
-            anchor: "center",
-            margin: 1,
-          },
-        }
+        { overlay: true }
       );
 
       // Overlay closed

@@ -3,11 +3,12 @@
  */
 
 import type { Component, Focusable, TUI } from "@mariozechner/pi-tui";
-import { matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.js";
 
 export class MessengerConfigOverlay implements Component, Focusable {
+  readonly width = 60;
   focused = false;
 
   private paths: string[];
@@ -83,68 +84,87 @@ export class MessengerConfigOverlay implements Component, Focusable {
     this.statusMessage = `Removed: ${removed.split("/").pop()}`;
   }
 
-  render(width: number): string[] {
-    const innerWidth = Math.max(0, width - 4);
+  render(_width: number): string[] {
+    const w = this.width;
+    const innerW = w - 2;
     const lines: string[] = [];
     const cwd = process.cwd();
     const isCurrentInList = matchesAutoRegisterPath(cwd, this.paths);
 
-    // Title
-    lines.push(this.theme.fg("accent", "Messenger Config"));
-    lines.push(this.theme.fg("dim", "─".repeat(innerWidth)));
-    lines.push("");
+    const border = (s: string) => this.theme.fg("dim", s);
+    const pad = (s: string, len: number) => s + " ".repeat(Math.max(0, len - visibleWidth(s)));
+    const row = (content: string) => border("│") + pad(" " + content, innerW) + border("│");
+    const emptyRow = () => border("│") + " ".repeat(innerW) + border("│");
+
+    // Top border with title
+    const titleText = " Messenger Config ";
+    const borderLen = innerW - titleText.length;
+    const leftBorder = Math.floor(borderLen / 2);
+    const rightBorder = borderLen - leftBorder;
+    lines.push(border("╭" + "─".repeat(leftBorder)) + this.theme.fg("accent", titleText) + border("─".repeat(rightBorder) + "╮"));
+
+    lines.push(emptyRow());
 
     // Current folder status
-    const cwdDisplay = truncateToWidth(cwd, Math.max(10, innerWidth - 20));
-    lines.push(`Current folder: ${cwdDisplay}`);
+    const cwdDisplay = truncateToWidth(cwd, Math.max(10, innerW - 20));
+    lines.push(row(`Current folder: ${cwdDisplay}`));
     const statusColor = isCurrentInList ? "accent" : "dim";
-    lines.push(`Auto-register: ${this.theme.fg(statusColor, isCurrentInList ? "YES" : "NO")}`);
-    lines.push("");
+    lines.push(row(`Auto-register: ${this.theme.fg(statusColor, isCurrentInList ? "YES" : "NO")}`));
 
-    // Path list
-    lines.push(this.theme.fg("dim", "─".repeat(innerWidth)));
-    lines.push("Auto-register paths:");
-    lines.push("");
+    lines.push(emptyRow());
+
+    // Divider
+    lines.push(border("├" + "─".repeat(innerW) + "┤"));
+
+    lines.push(emptyRow());
+    lines.push(row(this.theme.fg("dim", "Auto-register paths:")));
+    lines.push(emptyRow());
 
     if (this.paths.length === 0) {
-      lines.push(this.theme.fg("dim", "  (none configured)"));
+      lines.push(row(this.theme.fg("dim", "  (none configured)")));
     } else {
       for (let i = 0; i < this.paths.length; i++) {
         const path = this.paths[i];
         const isSelected = i === this.selectedIndex;
         const isCurrent = path === cwd;
         
-        const marker = isSelected ? "▸ " : "  ";
+        const marker = isSelected ? this.theme.fg("accent", "▸") : " ";
         const suffix = isCurrent ? this.theme.fg("dim", " (current)") : "";
-        const pathDisplay = truncateToWidth(path, Math.max(10, innerWidth - 15));
+        const pathDisplay = truncateToWidth(path, Math.max(10, innerW - 15));
         
         if (isSelected) {
-          lines.push(this.theme.fg("accent", marker + pathDisplay) + suffix);
+          lines.push(row(`${marker} ${this.theme.fg("accent", pathDisplay)}${suffix}`));
         } else {
-          lines.push(marker + pathDisplay + suffix);
+          lines.push(row(`${marker} ${pathDisplay}${suffix}`));
         }
       }
     }
 
-    lines.push("");
-    lines.push(this.theme.fg("dim", "─".repeat(innerWidth)));
+    lines.push(emptyRow());
+
+    // Divider
+    lines.push(border("├" + "─".repeat(innerW) + "┤"));
+
+    lines.push(emptyRow());
 
     // Status message
     if (this.statusMessage) {
-      lines.push(this.theme.fg("accent", this.statusMessage));
+      lines.push(row(this.theme.fg("accent", this.statusMessage)));
     } else {
-      lines.push("");
+      lines.push(emptyRow());
     }
 
     // Help
-    const help = "[a] Add current  [d] Delete  [↑↓] Navigate  [Esc] Save & close";
-    lines.push(this.theme.fg("dim", help));
+    const help = "a add  d delete  ↑↓ navigate  Esc save & close";
+    lines.push(row(this.theme.fg("dim", help)));
+
+    // Bottom border
+    lines.push(border("╰" + "─".repeat(innerW) + "╯"));
 
     return lines;
   }
 
   invalidate(): void {
-    // Clear status message on next action
     this.statusMessage = "";
   }
 

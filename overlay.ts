@@ -25,6 +25,7 @@ import * as store from "./store.js";
 const AGENTS_TAB = "[agents]";
 
 export class MessengerOverlay implements Component, Focusable {
+  readonly width = 80;
   focused = false;
 
   private selectedAgent: string | null = null;
@@ -215,10 +216,10 @@ export class MessengerOverlay implements Component, Focusable {
     }
   }
 
-  render(width: number): string[] {
+  render(_width: number): string[] {
     this.cachedAgents = null;  // Clear cache at start of render cycle
-    const innerWidth = Math.max(0, width - 4);
-    const totalHeight = Math.floor(this.tui.terminal.rows * 0.45);
+    const w = this.width;
+    const innerW = w - 2;
     const agents = this.getAgentsSorted();
 
     if (this.selectedAgent && this.selectedAgent !== AGENTS_TAB && !agents.find(a => a.name === this.selectedAgent)) {
@@ -226,35 +227,64 @@ export class MessengerOverlay implements Component, Focusable {
       this.scrollPosition = 0;  // Reset scroll when auto-switching due to agent death
     }
 
+    const border = (s: string) => this.theme.fg("dim", s);
+    const pad = (s: string, len: number) => s + " ".repeat(Math.max(0, len - visibleWidth(s)));
+    const row = (content: string) => border("│") + pad(" " + content, innerW) + border("│");
+    const emptyRow = () => border("│") + " ".repeat(innerW) + border("│");
+
     const lines: string[] = [];
 
-    lines.push(this.renderTitleBar(innerWidth, agents.length));
+    // Top border with title
+    const titleContent = this.renderTitleContent(agents.length);
+    const titleText = ` ${titleContent} `;
+    const titleLen = visibleWidth(titleContent) + 2;
+    const borderLen = Math.max(0, innerW - titleLen);
+    const leftBorder = Math.floor(borderLen / 2);
+    const rightBorder = borderLen - leftBorder;
+    lines.push(border("╭" + "─".repeat(leftBorder)) + titleText + border("─".repeat(rightBorder) + "╮"));
 
     if (agents.length === 0) {
-      const emptyLines = this.renderEmptyState(innerWidth, Math.max(1, totalHeight - 2));
-      lines.push(...emptyLines);
+      // Simple empty state - no height filling
+      lines.push(emptyRow());
+      lines.push(emptyRow());
+      lines.push(row(this.centerText("No other agents active", innerW - 2)));
+      lines.push(emptyRow());
+      lines.push(row(this.theme.fg("dim", this.centerText("Start another pi instance to chat", innerW - 2))));
+      lines.push(emptyRow());
+      lines.push(emptyRow());
     } else {
-      lines.push(this.renderTabBar(innerWidth, agents));
-      lines.push(this.theme.fg("dim", "─".repeat(innerWidth)));
+      lines.push(emptyRow());
+      lines.push(row(this.renderTabBar(innerW - 2, agents)));
+      lines.push(border("├" + "─".repeat(innerW) + "┤"));
 
-      const messageAreaHeight = Math.max(1, totalHeight - 5);
-      const messageLines = this.renderMessages(innerWidth, messageAreaHeight, agents);
-      lines.push(...messageLines);
+      const messageAreaHeight = 10; // Fixed height for message area
+      const messageLines = this.renderMessages(innerW - 2, messageAreaHeight, agents);
+      for (const line of messageLines) {
+        lines.push(row(line));
+      }
 
-      lines.push(this.theme.fg("dim", "─".repeat(innerWidth)));
-      lines.push(this.renderInputBar(innerWidth));
+      lines.push(border("├" + "─".repeat(innerW) + "┤"));
+      lines.push(row(this.renderInputBar(innerW - 2)));
     }
+
+    // Bottom border
+    lines.push(border("╰" + "─".repeat(innerW) + "╯"));
 
     return lines;
   }
 
-  private renderTitleBar(width: number, peerCount: number): string {
+  private centerText(text: string, width: number): string {
+    const padding = Math.max(0, width - visibleWidth(text));
+    const left = Math.floor(padding / 2);
+    return " ".repeat(left) + text;
+  }
+
+  private renderTitleContent(peerCount: number): string {
     const label = this.theme.fg("accent", "Messenger");
     const name = coloredAgentName(this.state.agentName);
     const peers = this.theme.fg("dim", `${peerCount} peer${peerCount === 1 ? "" : "s"}`);
 
-    const content = `${label} ── ${name} ── ${peers}`;
-    return truncateToWidth(content, width);
+    return `${label} ─ ${name} ─ ${peers}`;
   }
 
   private renderTabBar(width: number, agents: AgentRegistration[]): string {
@@ -302,25 +332,6 @@ export class MessengerOverlay implements Component, Focusable {
 
     const content = parts.join(" │ ");
     return truncateToWidth(content, width);
-  }
-
-  private renderEmptyState(width: number, height: number): string[] {
-    const lines: string[] = [];
-    const msg1 = "No other agents active";
-    const msg2 = "Start another pi instance to chat";
-
-    const padTop = Math.floor((height - 2) / 2);
-    for (let i = 0; i < padTop; i++) lines.push("");
-
-    const pad1 = " ".repeat(Math.max(0, Math.floor((width - visibleWidth(msg1)) / 2)));
-    const pad2 = " ".repeat(Math.max(0, Math.floor((width - visibleWidth(msg2)) / 2)));
-
-    lines.push(pad1 + msg1);
-    lines.push("");
-    lines.push(pad2 + this.theme.fg("dim", msg2));
-
-    while (lines.length < height) lines.push("");
-    return lines;
   }
 
   private renderMessages(width: number, height: number, agents: AgentRegistration[]): string[] {
