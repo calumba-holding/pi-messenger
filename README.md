@@ -4,7 +4,7 @@
 
 # Pi Messenger
 
-**Multi-agent coordination for pi. No daemon, no server, just files.**
+**Multi-agent coordination for [Pi coding agent](https://github.com/badlogic/pi-mono). No daemon, no server, just files.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue?style=for-the-badge)]()
