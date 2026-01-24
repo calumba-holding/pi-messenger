@@ -9,7 +9,12 @@ import type { MessengerState, Dirs } from "../../lib.js";
 import type { CrewParams } from "../types.js";
 import { result } from "../utils/result.js";
 import { discoverCrewAgents } from "../utils/discover.js";
-import { ensureAgentsInstalled, uninstallAgents } from "../utils/install.js";
+import { 
+  ensureAgentsInstalled, 
+  uninstallAgents,
+  ensureSkillsInstalled,
+  uninstallSkills 
+} from "../utils/install.js";
 import * as store from "../store.js";
 import { autonomousState } from "../state.js";
 
@@ -184,23 +189,29 @@ export async function executeCrew(
 
     case "install": {
       ensureAgentsInstalled();
+      ensureSkillsInstalled();
       const agents = discoverCrewAgents(cwd);
-      return result(`✅ Crew agents installed: ${agents.map(a => a.name).join(", ")}`, {
+      return result(`✅ Crew installed:\n- Agents: ${agents.map(a => a.name).join(", ")}\n- Skills: pi-messenger-crew`, {
         mode: "crew.install",
-        installed: agents.map(a => a.name)
+        agents: agents.map(a => a.name),
+        skills: ["pi-messenger-crew"]
       });
     }
 
     case "uninstall": {
-      const { removed, errors } = uninstallAgents();
+      const agentResult = uninstallAgents();
+      const skillResult = uninstallSkills();
+      const errors = [...agentResult.errors, ...skillResult.errors];
+      const removed = { agents: agentResult.removed, skills: skillResult.removed };
+      
       if (errors.length > 0) {
-        return result(`⚠️ Removed ${removed.length} agent(s) with ${errors.length} error(s):\n${errors.join("\n")}`, {
+        return result(`⚠️ Removed with ${errors.length} error(s):\n${errors.join("\n")}`, {
           mode: "crew.uninstall",
           removed,
           errors
         });
       }
-      return result(`✅ Removed ${removed.length} crew agent(s) from ~/.pi/agent/agents/`, {
+      return result(`✅ Removed:\n- ${agentResult.removed.length} agent(s)\n- ${skillResult.removed.length} skill(s)`, {
         mode: "crew.uninstall",
         removed
       });

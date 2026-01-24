@@ -241,6 +241,25 @@ Add to `~/.pi/agent/pi-messenger.json`:
 | `work.maxAttemptsPerTask` | Retries before blocking a task | `5` |
 | `work.maxWaves` | Max waves in autonomous mode | `50` |
 
+### Crew Install
+
+The `crew.install` action installs crew agents and skills to your pi config:
+
+```typescript
+pi_messenger({ action: "crew.install" })
+```
+
+**What gets installed:**
+- **10 agents** in `~/.pi/agent/agents/` (scouts, analysts, worker, reviewer)
+- **1 skill** in `~/.pi/agent/skills/` (pi-messenger-crew quick reference)
+
+Agents and skills are auto-installed on first use of `plan`, `work`, or `review`.
+
+To remove:
+```typescript
+pi_messenger({ action: "crew.uninstall" })
+```
+
 ## Chat Overlay
 
 `/messenger` opens an interactive chat UI:

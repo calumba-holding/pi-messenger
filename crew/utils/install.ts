@@ -1,7 +1,7 @@
 /**
- * Crew - Agent Installer
+ * Crew - Agent & Skill Installer
  * 
- * Copies crew agent definitions from extension source to user agents directory.
+ * Copies crew agent definitions and skills from extension source to user directories.
  */
 
 import * as fs from "node:fs";
@@ -13,11 +13,13 @@ import { homedir } from "node:os";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Source: crew/agents/ in extension
+// Agents: crew/agents/ -> ~/.pi/agent/agents/
 const SOURCE_AGENTS_DIR = path.resolve(__dirname, "..", "agents");
-
-// Target: ~/.pi/agent/agents/
 const TARGET_AGENTS_DIR = path.join(homedir(), ".pi", "agent", "agents");
+
+// Skills: skills/ -> ~/.pi/agent/skills/
+const SOURCE_SKILLS_DIR = path.resolve(__dirname, "..", "..", "skills");
+const TARGET_SKILLS_DIR = path.join(homedir(), ".pi", "agent", "skills");
 
 // List of crew agents to install
 const CREW_AGENTS = [
@@ -35,6 +37,11 @@ const CREW_AGENTS = [
   "crew-worker.md",
   // Reviewer (1)
   "crew-reviewer.md",
+];
+
+// List of skills to install (directory names)
+const CREW_SKILLS = [
+  "pi-messenger-crew",
 ];
 
 export interface InstallResult {
@@ -202,4 +209,165 @@ export function getSourceAgentsDir(): string {
  */
 export function getTargetAgentsDir(): string {
   return TARGET_AGENTS_DIR;
+}
+
+// =============================================================================
+// Skills Installation
+// =============================================================================
+
+export interface SkillInstallResult {
+  installed: string[];
+  updated: string[];
+  skipped: string[];
+  errors: string[];
+  targetDir: string;
+}
+
+/**
+ * Check if a skill directory needs updating.
+ */
+function skillNeedsUpdate(sourceDir: string, targetDir: string): boolean {
+  if (!fs.existsSync(targetDir)) return true;
+  
+  const skillFile = path.join(sourceDir, "SKILL.md");
+  const targetFile = path.join(targetDir, "SKILL.md");
+  
+  return needsUpdate(skillFile, targetFile);
+}
+
+/**
+ * Check which skills are missing or need updating.
+ */
+export function checkSkillStatus(): { missing: string[]; outdated: string[]; current: string[] } {
+  const missing: string[] = [];
+  const outdated: string[] = [];
+  const current: string[] = [];
+
+  for (const skill of CREW_SKILLS) {
+    const sourceDir = path.join(SOURCE_SKILLS_DIR, skill);
+    const targetDir = path.join(TARGET_SKILLS_DIR, skill);
+
+    if (!fs.existsSync(sourceDir)) {
+      continue;
+    }
+
+    if (!fs.existsSync(targetDir)) {
+      missing.push(skill);
+    } else if (skillNeedsUpdate(sourceDir, targetDir)) {
+      outdated.push(skill);
+    } else {
+      current.push(skill);
+    }
+  }
+
+  return { missing, outdated, current };
+}
+
+/**
+ * Install or update skills.
+ */
+export function installSkills(force: boolean = false): SkillInstallResult {
+  const result: SkillInstallResult = {
+    installed: [],
+    updated: [],
+    skipped: [],
+    errors: [],
+    targetDir: TARGET_SKILLS_DIR,
+  };
+
+  // Ensure target directory exists
+  if (!fs.existsSync(TARGET_SKILLS_DIR)) {
+    try {
+      fs.mkdirSync(TARGET_SKILLS_DIR, { recursive: true });
+    } catch (err) {
+      result.errors.push(`Failed to create directory: ${TARGET_SKILLS_DIR}`);
+      return result;
+    }
+  }
+
+  for (const skill of CREW_SKILLS) {
+    const sourceDir = path.join(SOURCE_SKILLS_DIR, skill);
+    const targetDir = path.join(TARGET_SKILLS_DIR, skill);
+
+    if (!fs.existsSync(sourceDir)) {
+      result.errors.push(`Source not found: ${skill}`);
+      continue;
+    }
+
+    const targetExists = fs.existsSync(targetDir);
+    const shouldUpdate = force || skillNeedsUpdate(sourceDir, targetDir);
+
+    if (!shouldUpdate) {
+      result.skipped.push(skill);
+      continue;
+    }
+
+    try {
+      // Create target directory
+      if (!targetExists) {
+        fs.mkdirSync(targetDir, { recursive: true });
+      }
+
+      // Copy all files from skill directory
+      const files = fs.readdirSync(sourceDir);
+      for (const file of files) {
+        const srcFile = path.join(sourceDir, file);
+        const dstFile = path.join(targetDir, file);
+        if (fs.statSync(srcFile).isFile()) {
+          fs.copyFileSync(srcFile, dstFile);
+        }
+      }
+
+      if (targetExists) {
+        result.updated.push(skill);
+      } else {
+        result.installed.push(skill);
+      }
+    } catch (err) {
+      result.errors.push(`Failed to copy ${skill}: ${err}`);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Uninstall skills.
+ */
+export function uninstallSkills(): { removed: string[]; notFound: string[]; errors: string[] } {
+  const removed: string[] = [];
+  const notFound: string[] = [];
+  const errors: string[] = [];
+
+  for (const skill of CREW_SKILLS) {
+    const targetDir = path.join(TARGET_SKILLS_DIR, skill);
+
+    if (!fs.existsSync(targetDir)) {
+      notFound.push(skill);
+      continue;
+    }
+
+    try {
+      fs.rmSync(targetDir, { recursive: true });
+      removed.push(skill);
+    } catch (err) {
+      errors.push(`Failed to remove ${skill}: ${err}`);
+    }
+  }
+
+  return { removed, notFound, errors };
+}
+
+/**
+ * Ensure skills are installed (auto-install if missing).
+ */
+export function ensureSkillsInstalled(): boolean {
+  const status = checkSkillStatus();
+  
+  if (status.missing.length === 0 && status.outdated.length === 0) {
+    return true;
+  }
+
+  const result = installSkills();
+  return result.errors.length === 0;
 }

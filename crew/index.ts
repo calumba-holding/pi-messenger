@@ -10,10 +10,16 @@ import type { MessengerState, Dirs, AgentMailMessage } from "../lib.js";
 import * as handlers from "../handlers.js";
 import type { CrewParams, AppendEntryFn } from "./types.js";
 import { result } from "./utils/result.js";
-import { ensureAgentsInstalled } from "./utils/install.js";
+import { ensureAgentsInstalled, ensureSkillsInstalled } from "./utils/install.js";
 
 type DeliverFn = (msg: AgentMailMessage) => void;
 type UpdateStatusFn = (ctx: ExtensionContext) => void;
+
+/** Ensure both agents and skills are installed */
+function ensureCrewInstalled() {
+  ensureAgentsInstalled();
+  ensureSkillsInstalled();
+}
 
 /**
  * Execute a crew action.
@@ -145,7 +151,7 @@ export async function executeCrewAction(
 
     case 'plan': {
       // Auto-install agents if missing
-      ensureAgentsInstalled();
+      ensureCrewInstalled();
       try {
         const planHandler = await import("./handlers/plan.js");
         return planHandler.execute(params, state, dirs, ctx);
@@ -157,7 +163,7 @@ export async function executeCrewAction(
 
     case 'work': {
       // Auto-install agents if missing
-      ensureAgentsInstalled();
+      ensureCrewInstalled();
       try {
         const workHandler = await import("./handlers/work.js");
         return workHandler.execute(params, state, dirs, ctx, appendEntry);
@@ -169,7 +175,7 @@ export async function executeCrewAction(
 
     case 'review': {
       // Auto-install agents if missing
-      ensureAgentsInstalled();
+      ensureCrewInstalled();
       try {
         const reviewHandler = await import("./handlers/review.js");
         return reviewHandler.execute(params, state, dirs, ctx);
@@ -181,7 +187,7 @@ export async function executeCrewAction(
 
     case 'interview': {
       // Auto-install agents if missing
-      ensureAgentsInstalled();
+      ensureCrewInstalled();
       try {
         const interviewHandler = await import("./handlers/interview.js");
         return interviewHandler.execute(params, state, dirs, ctx);
@@ -193,7 +199,7 @@ export async function executeCrewAction(
 
     case 'sync': {
       // Auto-install agents if missing
-      ensureAgentsInstalled();
+      ensureCrewInstalled();
       try {
         const syncHandler = await import("./handlers/sync.js");
         return syncHandler.execute(params, state, dirs, ctx);

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.1 - 2026-01-24
+
+### Added
+
+- **Skill installation** - `crew.install` now installs `pi-messenger-crew` skill alongside agents
+- **Skills directory** - Extension ships skills in `skills/` (moved from `crew/skills/`)
+- **README documentation** - Added "Crew Install" section explaining what gets installed
+
+### Fixed
+
+- **Worker pi_messenger access** - Spawned workers now receive `--extension` flag, giving them access to `pi_messenger` tool for mesh coordination, file reservations, and sibling messaging
+
+### Changed
+
+- `crew.install` output now lists both agents and skills
+- `crew.uninstall` removes both agents and skills
+
 ## 0.7.0 - 2026-01-23
 
 ### Breaking Changes
