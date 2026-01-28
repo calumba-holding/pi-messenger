@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-01-27
+
+### Fixed
+- Google API compatibility: Use `StringEnum` for string literal unions (`type`, `autoRegisterPath`) and `Type.Any()` for mixed-type unions (`to`, `release`) to avoid unsupported `anyOf`/`const` JSON Schema patterns
+
 ## 0.7.2 - 2026-01-26
 
 ### Changed

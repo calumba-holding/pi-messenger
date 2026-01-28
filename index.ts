@@ -11,6 +11,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import type { TUI } from "@mariozechner/pi-tui";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { StringEnum } from "@mariozechner/pi-ai";
 import {
   type MessengerState,
   type Dirs,
@@ -231,10 +232,7 @@ Mode: action (if provided) > legacy key-based routing`,
         prs: Type.Optional(Type.Array(Type.String()))
       }, { description: "Evidence for task.done" })),
       content: Type.Optional(Type.String({ description: "Content for task spec" })),
-      type: Type.Optional(Type.Union([
-        Type.Literal("plan"),
-        Type.Literal("impl")
-      ], { description: "Review type (inferred from target if omitted)" })),
+      type: Type.Optional(StringEnum(["plan", "impl"], { description: "Review type (inferred from target if omitted)" })),
       autonomous: Type.Optional(Type.Boolean({ description: "Run work continuously until done/blocked" })),
       concurrency: Type.Optional(Type.Number({ description: "Override worker concurrency" })),
       cascade: Type.Optional(Type.Boolean({ description: "For task.reset - also reset dependent tasks" })),
@@ -251,25 +249,15 @@ Mode: action (if provided) > legacy key-based routing`,
       complete: Type.Optional(Type.String({ description: "Task ID to mark complete (legacy)" })),
       notes: Type.Optional(Type.String({ description: "Completion notes" })),
       swarm: Type.Optional(Type.Boolean({ description: "Get swarm status" })),
-      to: Type.Optional(Type.Union([
-        Type.String(),
-        Type.Array(Type.String())
-      ], { description: "Target agent name (string) or multiple names (array)" })),
+      to: Type.Optional(Type.Any({ description: "Target agent name (string) or multiple names (array)" })),
       broadcast: Type.Optional(Type.Boolean({ description: "Send to all active agents" })),
       message: Type.Optional(Type.String({ description: "Message to send" })),
       replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
       reserve: Type.Optional(Type.Array(Type.String(), { description: "Paths to reserve (legacy - use action: 'reserve' with paths)" })),
       reason: Type.Optional(Type.String({ description: "Reason for reservation or claim" })),
-      release: Type.Optional(Type.Union([
-        Type.Array(Type.String()),
-        Type.Boolean()
-      ], { description: "Patterns to release (array) or true to release all (legacy)" })),
+      release: Type.Optional(Type.Any({ description: "Patterns to release (array) or true to release all (legacy)" })),
       rename: Type.Optional(Type.String({ description: "Rename yourself (legacy - use action: 'rename' with name)" })),
-      autoRegisterPath: Type.Optional(Type.Union([
-        Type.Literal("add"),
-        Type.Literal("remove"),
-        Type.Literal("list")
-      ], { description: "Manage auto-register paths: add/remove current folder, or list all" })),
+      autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" })),
       list: Type.Optional(Type.Boolean({ description: "List other agents" }))
     }),
 
