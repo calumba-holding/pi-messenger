@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-01-29
+
+### Added
+- **Living Presence** - Agents now have rich status indicators (active, idle, away, stuck) based on activity recency, open tasks, and reservations. Status is computed from `lastActivityAt` with configurable stuck threshold.
+- **Activity Feed** - Append-only JSONL feed (`feed.jsonl`) tracks edits, commits, test runs, messages, joins/leaves, and crew task events. Pruned on startup to `feedRetention` limit. New `feed` action to query events.
+- **Tool & Token Tracking** - Each agent's session tracks tool call count and cumulative token usage, visible in `list`, `whois`, and the overlay.
+- **Auto Status** - Agents generate contextual status messages from recent activity: "on fire" after rapid edits, "debugging..." after repeated test runs, "just shipped" after a commit, "exploring the codebase" while reading files.
+- **Stuck Detection** - Agents idle beyond `stuckThreshold` with an open task or reservation are flagged as stuck. Peers with a UI receive a notification. A `stuck` event is logged to the feed.
+- **Name Themes** - Five name generation themes: `default` (SwiftRaven), `nature` (OakTree), `space` (LunarDust), `minimal` (Alpha), and `custom` with user-supplied word lists.
+- **`whois` action** - Detailed agent info: status, model, branch, session age, tool calls, tokens, reservations, recent files, swarm claims.
+- **`set_status` action** - Set or clear a custom status message. Overrides auto-status until cleared.
+- **`feed` action** - Query the activity feed with configurable `limit`.
+- **Overlay: agent cards** - The Agents tab now renders full presence cards with status indicator, current activity, tool/token counts, reservations, and status messages.
+- **Overlay: activity feed section** - Below agent cards, recent feed events are displayed in a compact time-prefixed format.
+- **Overlay: chat input** - Type `@Name msg` for DMs, `@all msg` for broadcasts. Plain text broadcasts from the Agents tab or DMs from an agent's tab.
+- **Crew events in feed** - Task starts, completions, and blocks appear in the activity feed with a `[Crew]` prefix. Controlled by `crewEventsInFeed` config.
+- **New config options** - `nameTheme`, `nameWords`, `feedRetention`, `stuckThreshold`, `stuckNotify`, `autoStatus`, `crewEventsInFeed`.
+
+### Fixed
+- **Self-whois missing Model and Branch lines** - `buildSelfRegistration` returned `model: ""` and omitted `gitBranch`/`spec`, so self-whois skipped the Model and Branch lines that peers could see. Added `model` to `MessengerState`, populated during registration and updates, and included all three fields in self-representation.
+- **Rename desync: stale session time and activity** - `renameAgent` wrote fresh `startedAt` and `lastActivityAt` to disk but didn't update the in-memory state. The next registry flush would overwrite the disk's fresh values with stale ones, making the agent appear idle for the entire pre-rename session duration. Self-whois also showed a different session age than peer-whois.
+- **Orphaned comma in crew status "In Progress" formatting** - When a task had no `assigned_to` but `attempt_count > 1`, the output produced a leading comma. Rewrote to build suffix parts as an array and join conditionally.
+- **Blocked reason unconditional "..." truncation** - Crew status always appended "..." to `blocked_reason` regardless of length, so "API timeout" displayed as "API timeout...". Now only truncates when the reason exceeds 40 characters.
+- **`agentHasTask` duplicated 4 times** - Identical logic checking swarm claims + crew tasks existed in `handlers.ts` (2 places), `index.ts`, and `overlay.ts`. Extracted to a shared pure function in `lib.ts`. Eliminates divergence risk (the crew tasks check was already missing from some copies).
+- **Dead code in `executeRelease`** - Removed redundant `before` variable and `releasedCount` computation, replaced with direct `releasedPatterns.length`.
+
 ## [0.7.3] - 2026-01-27
 
 ### Fixed

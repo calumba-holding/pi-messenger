@@ -230,30 +230,4 @@ export function navigateTask(viewState: CrewViewState, direction: 1 | -1, taskCo
   );
 }
 
-/**
- * Get the currently selected task ID.
- */
-export function getSelectedTaskId(cwd: string, viewState: CrewViewState): string | null {
-  const tasks = crewStore.getTasks(cwd);
-  if (viewState.selectedTaskIndex >= 0 && viewState.selectedTaskIndex < tasks.length) {
-    return tasks[viewState.selectedTaskIndex].id;
-  }
-  return null;
-}
 
-// Legacy exports for compatibility (no-ops now that epics are removed)
-export function toggleEpicExpansion(_viewState: CrewViewState, _epicId: string): void {
-  // No-op - epics removed
-}
-
-export function navigateEpic(viewState: CrewViewState, direction: 1 | -1, _epicCount: number): void {
-  // Redirect to task navigation
-  const cwd = process.cwd();
-  const tasks = crewStore.getTasks(cwd);
-  navigateTask(viewState, direction, tasks.length);
-}
-
-export function getSelectedEpicId(_cwd: string, _viewState: CrewViewState): string | null {
-  // No-op - epics removed
-  return null;
-}

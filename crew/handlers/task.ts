@@ -10,12 +10,13 @@ import type { MessengerState, Dirs } from "../../lib.js";
 import type { CrewParams, TaskEvidence } from "../types.js";
 import { result } from "../utils/result.js";
 import * as store from "../store.js";
+import { logFeedEvent } from "../../feed.js";
 
 export async function execute(
   op: string,
   params: CrewParams,
   state: MessengerState,
-  _dirs: Dirs,
+  dirs: Dirs,
   ctx: ExtensionContext
 ) {
   const cwd = ctx.cwd ?? process.cwd();
@@ -28,11 +29,11 @@ export async function execute(
     case "list":
       return taskList(cwd);
     case "start":
-      return taskStart(cwd, params, state);
+      return taskStart(cwd, params, state, dirs);
     case "done":
-      return taskDone(cwd, params);
+      return taskDone(cwd, params, state, dirs);
     case "block":
-      return taskBlock(cwd, params);
+      return taskBlock(cwd, params, state, dirs);
     case "unblock":
       return taskUnblock(cwd, params);
     case "ready":
@@ -207,7 +208,7 @@ function taskList(cwd: string) {
 // task.start
 // =============================================================================
 
-function taskStart(cwd: string, params: CrewParams, state: MessengerState) {
+function taskStart(cwd: string, params: CrewParams, state: MessengerState, dirs: Dirs) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.start", { mode: "task.start", error: "missing_id" });
@@ -250,6 +251,8 @@ function taskStart(cwd: string, params: CrewParams, state: MessengerState) {
     return result(`Error: Failed to start task ${id}`, { mode: "task.start", error: "start_failed", id });
   }
 
+  logFeedEvent(dirs, agentName, "task.start", id, started.title);
+
   const spec = store.getTaskSpec(cwd, id);
   const specPreview = spec && !spec.includes("*Spec pending*")
     ? `\n\n**Spec:**\n\`\`\`\n${spec.length > 1000 ? spec.slice(0, 1000) + "..." : spec}\n\`\`\``
@@ -282,7 +285,7 @@ If blocked: \`pi_messenger({ action: "task.block", id: "${id}", reason: "..." })
 // task.done
 // =============================================================================
 
-function taskDone(cwd: string, params: CrewParams) {
+function taskDone(cwd: string, params: CrewParams, state: MessengerState, dirs: Dirs) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.done", { mode: "task.done", error: "missing_id" });
@@ -307,7 +310,8 @@ function taskDone(cwd: string, params: CrewParams) {
     return result(`Error: Failed to complete task ${id}`, { mode: "task.done", error: "complete_failed", id });
   }
 
-  // Check progress
+  logFeedEvent(dirs, state.agentName || "unknown", "task.done", id, summary);
+
   const plan = store.getPlan(cwd);
   const tasks = store.getTasks(cwd);
   const remaining = tasks.filter(t => t.status !== "done");
@@ -346,7 +350,7 @@ function taskDone(cwd: string, params: CrewParams) {
 // task.block
 // =============================================================================
 
-function taskBlock(cwd: string, params: CrewParams) {
+function taskBlock(cwd: string, params: CrewParams, state: MessengerState, dirs: Dirs) {
   const id = params.id;
   if (!id) {
     return result("Error: id required for task.block", { mode: "task.block", error: "missing_id" });
@@ -361,10 +365,18 @@ function taskBlock(cwd: string, params: CrewParams) {
     return result(`Error: Task ${id} not found`, { mode: "task.block", error: "not_found", id });
   }
 
+  if (task.status !== "in_progress") {
+    return result(`Error: Task ${id} is ${task.status}, not in_progress. Only in-progress tasks can be blocked.`, {
+      mode: "task.block", error: "invalid_status", id, status: task.status
+    });
+  }
+
   const blocked = store.blockTask(cwd, id, params.reason);
   if (!blocked) {
     return result(`Error: Failed to block task ${id}`, { mode: "task.block", error: "block_failed", id });
   }
+
+  logFeedEvent(dirs, state.agentName || "unknown", "task.block", id, params.reason);
 
   const text = `🚫 Blocked task **${id}**
 

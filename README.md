@@ -4,12 +4,12 @@
 
 # Pi Messenger
 
-**What if multiple agents in different terminals sharing a folder could talk to each other like they're in a chat room?** Join, see who's online. Claim tasks, reserve files, send messages. Built on [Pi's](https://github.com/badlogic/pi-mono) extension system. No daemon, no server, just files.
+**What if multiple agents in different terminals sharing a folder could talk to each other like they're in a chat room?** Join, see who's online and what they're doing. Claim tasks, reserve files, send messages. Built on [Pi's](https://github.com/badlogic/pi-mono) extension system. No daemon, no server, just files.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue?style=for-the-badge)]()
 
-> ⚠️ **Beta** - Core messaging and file reservations are stable. **Crew task orchestration** (plan/work/review) is newer and not fully tested yet. Please [open an issue](https://github.com/nicobailon/pi-messenger/issues) if you encounter problems.
+> ⚠️ **Beta** - Core messaging, presence, and file reservations are stable. **Crew task orchestration** (plan/work/review) is newer and not fully tested yet. Please [open an issue](https://github.com/nicobailon/pi-messenger/issues) if you encounter problems.
 
 Pi-messenger adds a `pi_messenger` tool that **agents use** for coordination. You don't type these commands - you ask your agent to do things, and it calls `pi_messenger` behind the scenes.
 
@@ -61,13 +61,56 @@ msg: SwiftRaven (2 peers) ●3
 
 ## Features
 
-**Discovery** - Agents register with memorable names (SwiftRaven, IronKnight). See who's active, what model they're using, which git branch they're on.
+**Living Presence** - Agents have rich presence with status indicators (🟢 active, 🟡 idle, 🟠 away, 🔴 stuck), tool call counts, token usage, and auto-generated status messages like "on fire 🔥" or "debugging...".
+
+**Activity Feed** - A unified timeline of everything happening: edits, commits, test runs, messages, task starts/completions. Crew events appear inline with a `[Crew]` prefix.
+
+**Discovery** - Agents register with memorable themed names (SwiftRaven, LunarDust, OakTree). See who's active, what they're working on, which model and git branch they're on.
 
 **Messaging** - Send messages between agents. Recipients wake up immediately and see the message as a steering prompt. Great for handoffs and coordination.
 
 **File Reservations** - Claim files or directories. Other agents get blocked with a clear message telling them who to coordinate with. Auto-releases on exit.
 
+**Stuck Detection** - Agents idle too long with an open task or reservation are flagged as stuck. You get a notification so you can intervene.
+
+**Human as Participant** - Your interactive pi session appears in the agent list with `(you)`. Same activity tracking, same status messages. You can chat from the overlay.
+
 **Swarm Coordination** - Multiple agents work on the same spec file. Claim tasks atomically, mark them complete, see who's doing what.
+
+## Chat Overlay
+
+`/messenger` opens an interactive overlay with agent presence, activity feed, and chat:
+
+```
+╭─ Messenger ── 3 agents ── myapp ────────────────────╮
+│                                                      │
+│ 🟢 SwiftRaven (you)                                  │
+│    editing login.ts - 12 tools - 31.0k - on fire 🔥  │
+│                                                      │
+│ 🟡 GoldFalcon                             idle 2m    │
+│    8 tools - 24.1k - 📁 src/api/                     │
+│                                                      │
+│ 🔴 IronKnight                             stuck      │
+│    3 tools - 16.4k                                   │
+│                                                      │
+│ Activity                                             │
+│ 10:42 SwiftRaven editing login.ts                    │
+│ 10:40 GoldFalcon → SwiftRaven: "auth done?"          │
+│ 10:38 SwiftRaven committed "feat: add OAuth"         │
+│ 10:35 [Crew] GoldFalcon started task-03              │
+├──────────────────────────────────────────────────────┤
+│ > @GoldFalcon almost done                [Tab] [Enter]│
+╰──────────────────────────────────────────────────────╯
+```
+
+Chat input supports `@Name msg` for DMs and `@all msg` for broadcasts. Text without `@` broadcasts from the Agents tab or DMs the selected agent tab.
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `←` `→` | Switch tabs (Agents, Crew, agent DMs, All) |
+| `↑` `↓` | Scroll history / navigate crew tasks |
+| `Enter` | Send message |
+| `Esc` | Close |
 
 ## Crew: Task Orchestration
 
@@ -187,7 +230,6 @@ pi_messenger({ action: "work", autonomous: true })
 
 Autonomous mode:
 - Executes waves of parallel workers
-- Reviews each task after completion
 - Auto-blocks on failure
 - Stops when all tasks done or blocked
 - Respects `maxWaves` limit (default: 50)
@@ -197,7 +239,7 @@ Autonomous mode:
 The `/messenger` overlay includes a Crew tab showing task status:
 
 ```
-╭─ Messenger ── SwiftRaven ── 2 peers ─────────────────╮
+╭─ Messenger ── 3 agents ── myapp ──────────────────────╮
 │ Agents │ ▸ Crew (2/5) │ ● GoldFalcon │ + All         │
 ├──────────────────────────────────────────────────────┤
 │                                                      │
@@ -224,6 +266,7 @@ The `/messenger` overlay includes a Crew tab showing task status:
 │   ├── task-1.json         # Task metadata
 │   ├── task-1.md           # Task specification
 │   └── ...
+├── blocks/                 # Block context for blocked tasks
 ├── artifacts/              # Debug artifacts
 └── config.json             # Project-level crew config
 ```
@@ -246,8 +289,8 @@ Add to `~/.pi/agent/pi-messenger.json`:
 |---------|-------------|---------|
 | `concurrency.scouts` | Max parallel scouts during planning | `4` |
 | `concurrency.workers` | Max parallel workers during work | `2` |
-| `review.enabled` | Auto-review tasks after completion | `true` |
-| `review.maxIterations` | Max review cycles before blocking | `3` |
+| `review.enabled` | Enable review functionality | `true` |
+| `review.maxIterations` | Max review iterations per task | `3` |
 | `work.maxAttemptsPerTask` | Retries before blocking a task | `5` |
 | `work.maxWaves` | Max waves in autonomous mode | `50` |
 
@@ -268,55 +311,60 @@ To remove:
 pi_messenger({ action: "crew.uninstall" })
 ```
 
-## Chat Overlay
-
-`/messenger` opens an interactive chat UI:
-
-```
-╭─ Messenger ── SwiftRaven ── 2 peers ────────────────╮
-│ ▸ Agents │ ● GoldFalcon │ ● IronKnight (1) │ + All  │
-├─────────────────────────────────────────────────────┤
-│ ./feature-spec.md:                                  │
-│   SwiftRaven (you)   TASK-03    Implementing auth   │
-│   GoldFalcon         TASK-04    API endpoints       │
-├─────────────────────────────────────────────────────┤
-│ > Agents overview                    [Tab] [Enter]  │
-╰─────────────────────────────────────────────────────╯
-```
-
-| Key | Action |
-|-----|--------|
-| `Tab` / `←` `→` | Switch tabs |
-| `↑` `↓` | Scroll history |
-| `Enter` | Send message |
-| `Esc` | Close |
-
 ## Tool Reference
 
 ### Action-Based API (Recommended)
 
+**Coordination**
+| Action | Description |
+|--------|-------------|
+| `join` | Join the agent mesh |
+| `list` | List agents with presence info |
+| `status` | Show your status or crew progress |
+| `whois` | Detailed info about an agent |
+| `feed` | Show activity feed |
+| `set_status` | Set custom status message (omit `message` to clear) |
+| `send` | Send DM (requires `to` + `message`) |
+| `broadcast` | Broadcast to all (requires `message`) |
+| `reserve` | Reserve files (requires `paths`) |
+| `release` | Release reservations (optional `paths`, or releases all) |
+| `rename` | Change your name (requires `name`) |
+| `swarm` | Show swarm task status |
+| `claim` | Claim a swarm task (requires `taskId`) |
+| `unclaim` | Release a swarm claim (requires `taskId`) |
+| `complete` | Complete a swarm task (requires `taskId`) |
+
 ```typescript
 pi_messenger({
   action: string,              // Action to perform
-  
+
+  // Coordination
+  name?: string,               // For whois, rename
+  message?: string,            // For send, broadcast, set_status
+  to?: string | string[],      // For send
+  paths?: string[],            // For reserve, release
+  reason?: string,             // For reserve, claim, task.block
+  limit?: number,              // For feed (default: 20)
+
   // Plan
   prd?: string,                // PRD file path
-  
+
   // Task identifiers
   id?: string,                 // Task ID (task-N)
+  taskId?: string,             // Swarm task ID
   target?: string,             // Target for review
-  
+
   // Creation
   title?: string,              // For task.create
   dependsOn?: string[],        // Task dependencies
-  
+
   // Completion
   summary?: string,            // For task.done
-  
+
   // Work options
   autonomous?: boolean,        // Run continuously
   concurrency?: number,        // Override concurrency
-  
+
   // Reset
   cascade?: boolean,           // Reset dependent tasks too
 })
@@ -361,28 +409,40 @@ Create `~/.pi/agent/pi-messenger.json`:
 {
   "autoRegister": false,
   "autoRegisterPaths": ["~/projects/team-collab"],
-  "scopeToFolder": false
+  "scopeToFolder": false,
+  "nameTheme": "default",
+  "stuckThreshold": 900,
+  "stuckNotify": true
 }
 ```
 
 | Setting | Description | Default |
 |---------|-------------|---------|
 | `autoRegister` | Join mesh on startup | `false` |
-| `autoRegisterPaths` | Folders where auto-join is enabled | `[]` |
+| `autoRegisterPaths` | Folders where auto-join is enabled (supports `*` globs) | `[]` |
 | `scopeToFolder` | Only see agents in same directory | `false` |
+| `nameTheme` | Name generation theme: `default`, `nature`, `space`, `minimal`, `custom` | `"default"` |
+| `nameWords` | Custom theme words: `{ adjectives: [...], nouns: [...] }` | — |
+| `feedRetention` | Max events kept in activity feed | `50` |
+| `stuckThreshold` | Seconds of inactivity before stuck detection | `900` (15m) |
+| `stuckNotify` | Show notification when a peer appears stuck | `true` |
+| `autoStatus` | Auto-generate status messages from activity | `true` |
+| `crewEventsInFeed` | Include crew task events in activity feed | `true` |
+| `contextMode` | Context injection level: `full`, `minimal`, `none` | `"full"` |
 
 ## How It Works
 
 ```
 ~/.pi/agent/messenger/
-├── registry/           # Agent registrations (PID, cwd, model, spec)
+├── registry/           # Agent registrations (PID, cwd, model, activity, tokens)
 ├── inbox/              # Message delivery
+├── feed.jsonl          # Activity feed (append-only, pruned on startup)
 ├── claims.json         # Active task claims
 ├── completions.json    # Completed tasks
 └── swarm.lock          # Atomic lock for claims
 ```
 
-File-based coordination. No daemon. Dead agents detected via PID and cleaned up automatically.
+File-based coordination. No daemon. Activity tracking updates the registry every 10 seconds via debounced flushes. Dead agents detected via PID and cleaned up automatically - a "leave" event is logged when stale registrations are removed.
 
 ## Credits
 

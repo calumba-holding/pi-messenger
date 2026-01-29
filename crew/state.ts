@@ -41,20 +41,6 @@ export const autonomousState: AutonomousState = {
 };
 
 /**
- * Reset autonomous state.
- */
-export function resetAutonomousState(): void {
-  autonomousState.active = false;
-  autonomousState.cwd = null;
-  autonomousState.waveNumber = 0;
-  autonomousState.attemptsPerTask = {};
-  autonomousState.waveHistory = [];
-  autonomousState.startedAt = null;
-  autonomousState.stoppedAt = null;
-  autonomousState.stopReason = null;
-}
-
-/**
  * Start autonomous mode.
  */
 export function startAutonomous(cwd: string): void {
@@ -99,18 +85,4 @@ export function restoreAutonomousState(data: Partial<AutonomousState>): void {
   if (data.stopReason !== undefined) autonomousState.stopReason = data.stopReason;
 }
 
-/**
- * Increment attempt count for a task.
- */
-export function incrementTaskAttempt(taskId: string): number {
-  const current = autonomousState.attemptsPerTask[taskId] ?? 0;
-  autonomousState.attemptsPerTask[taskId] = current + 1;
-  return current + 1;
-}
 
-/**
- * Get attempt count for a task.
- */
-export function getTaskAttempts(taskId: string): number {
-  return autonomousState.attemptsPerTask[taskId] ?? 0;
-}

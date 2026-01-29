@@ -15,6 +15,10 @@ import {
   truncatePathLeft,
   getDisplayMode,
   displaySpecPath,
+  computeStatus,
+  STATUS_INDICATORS,
+  buildSelfRegistration,
+  agentHasTask,
   type MessengerState,
   type Dirs,
   type AgentMailMessage,
@@ -22,6 +26,7 @@ import {
 } from "./lib.js";
 import * as store from "./store.js";
 import * as crewStore from "./crew/store.js";
+import { readFeedEvents, formatFeedLine as sharedFormatFeedLine, logFeedEvent, type FeedEvent } from "./feed.js";
 import {
   renderCrewContent,
   renderCrewStatusBar,
@@ -29,6 +34,7 @@ import {
   navigateTask,
   type CrewViewState,
 } from "./crew-overlay.js";
+import { loadConfig } from "./config.js";
 
 const AGENTS_TAB = "[agents]";
 const CREW_TAB = "[crew]";
@@ -43,6 +49,7 @@ export class MessengerOverlay implements Component, Focusable {
   private cachedAgents: AgentRegistration[] | null = null;
   private crewViewState: CrewViewState = createCrewViewState();
   private cwd: string;
+  private stuckThresholdMs: number;
 
   constructor(
     private tui: TUI,
@@ -52,11 +59,13 @@ export class MessengerOverlay implements Component, Focusable {
     private done: () => void
   ) {
     this.cwd = process.cwd();
+    const cfg = loadConfig(this.cwd);
+    this.stuckThresholdMs = cfg.stuckThreshold * 1000;
     const agents = this.getAgentsSorted();
     const withUnread = agents.find(a => (state.unreadCounts.get(a.name) ?? 0) > 0);
-    this.selectedAgent = withUnread?.name ?? agents[0]?.name ?? null;
+    this.selectedAgent = withUnread?.name ?? AGENTS_TAB;
 
-    if (this.selectedAgent) {
+    if (this.selectedAgent && this.selectedAgent !== AGENTS_TAB && this.selectedAgent !== CREW_TAB) {
       state.unreadCounts.set(this.selectedAgent, 0);
     }
   }
@@ -175,10 +184,9 @@ export class MessengerOverlay implements Component, Focusable {
 
     if (matchesKey(data, "enter")) {
       if (this.selectedAgent === CREW_TAB) {
-        // Enter does nothing in crew view - it's a read-only status display
         return;
       }
-      if (this.selectedAgent !== AGENTS_TAB && this.inputText.trim()) {
+      if (this.inputText.trim()) {
         this.sendMessage(agents);
       }
       return;
@@ -216,19 +224,37 @@ export class MessengerOverlay implements Component, Focusable {
   }
 
   private sendMessage(agents: AgentRegistration[]): void {
-    const text = this.inputText.trim();
+    let text = this.inputText.trim();
     if (!text) return;
 
-    if (this.selectedAgent === null) {
-      // Broadcast: best-effort delivery to all agents
+    let targetAgent: string | null = null;
+    let isBroadcast = false;
+
+    if (text.startsWith("@all ")) {
+      text = text.slice(5).trim();
+      isBroadcast = true;
+    } else if (text.startsWith("@")) {
+      const spaceIdx = text.indexOf(" ");
+      if (spaceIdx > 1) {
+        const name = text.slice(1, spaceIdx);
+        const agent = agents.find(a => a.name === name);
+        if (agent) {
+          targetAgent = name;
+          text = text.slice(spaceIdx + 1).trim();
+        }
+      }
+    }
+
+    if (!text) return;
+
+    if (isBroadcast || (this.selectedAgent === null && !targetAgent) || this.selectedAgent === AGENTS_TAB) {
       for (const agent of agents) {
         try {
           store.sendMessageToAgent(this.state, this.dirs, agent.name, text);
         } catch {
-          // Ignore individual failures
+          // Ignore
         }
       }
-      // Store broadcast message regardless of send failures
       const broadcastMsg: AgentMailMessage = {
         id: randomUUID(),
         from: this.state.agentName,
@@ -241,25 +267,31 @@ export class MessengerOverlay implements Component, Focusable {
       if (this.state.broadcastHistory.length > MAX_CHAT_HISTORY) {
         this.state.broadcastHistory.shift();
       }
+      const preview = text.length > 60 ? text.slice(0, 57) + "..." : text;
+      logFeedEvent(this.dirs, this.state.agentName, "message", undefined, `broadcast: "${preview}"`);
       this.inputText = "";
       this.scrollPosition = 0;
       this.tui.requestRender();
     } else {
-      // Regular send: keep input on failure so user can retry
+      const recipient = targetAgent ?? this.selectedAgent;
+      if (!recipient || recipient === AGENTS_TAB || recipient === CREW_TAB) return;
+
       try {
-        const msg = store.sendMessageToAgent(this.state, this.dirs, this.selectedAgent, text);
-        let history = this.state.chatHistory.get(this.selectedAgent);
+        const msg = store.sendMessageToAgent(this.state, this.dirs, recipient, text);
+        let history = this.state.chatHistory.get(recipient);
         if (!history) {
           history = [];
-          this.state.chatHistory.set(this.selectedAgent, history);
+          this.state.chatHistory.set(recipient, history);
         }
         history.push(msg);
         if (history.length > MAX_CHAT_HISTORY) history.shift();
+        const preview = text.length > 60 ? text.slice(0, 57) + "..." : text;
+        logFeedEvent(this.dirs, this.state.agentName, "message", recipient, `\u2192 ${recipient}: "${preview}"`);
         this.inputText = "";
         this.scrollPosition = 0;
         this.tui.requestRender();
       } catch {
-        // On error, keep input text so user can retry
+        // Keep input on failure
       }
     }
   }
@@ -333,10 +365,11 @@ export class MessengerOverlay implements Component, Focusable {
 
   private renderTitleContent(peerCount: number): string {
     const label = this.theme.fg("accent", "Messenger");
-    const name = coloredAgentName(this.state.agentName);
-    const peers = this.theme.fg("dim", `${peerCount} peer${peerCount === 1 ? "" : "s"}`);
+    const totalCount = peerCount + 1;
+    const count = this.theme.fg("dim", `${totalCount} agent${totalCount === 1 ? "" : "s"}`);
+    const folder = this.theme.fg("dim", extractFolder(process.cwd()));
 
-    return `${label} ─ ${name} ─ ${peers}`;
+    return `${label} ─ ${count} ─ ${folder}`;
   }
 
   private renderTabBar(width: number, agents: AgentRegistration[]): string {
@@ -439,85 +472,74 @@ export class MessengerOverlay implements Component, Focusable {
 
   private renderAgentsOverview(width: number, height: number, agents: AgentRegistration[]): string[] {
     const lines: string[] = [];
-    const hasAnySpec = this.hasAnySpec(agents);
+    const allClaims = store.getClaims(this.dirs);
 
-    if (hasAnySpec) {
-      const claims = store.getClaims(this.dirs);
-      const claimByAgent = new Map<string, { taskId: string; reason?: string }>();
-      for (const tasks of Object.values(claims)) {
-        for (const [taskId, claim] of Object.entries(tasks)) {
-          claimByAgent.set(claim.agent, { taskId, reason: claim.reason });
-        }
+    const renderCard = (a: AgentRegistration, isSelf: boolean): void => {
+      const computed = computeStatus(
+        a.activity?.lastActivityAt ?? a.startedAt,
+        agentHasTask(a.name, allClaims, crewStore.getTasks(a.cwd)),
+        (a.reservations?.length ?? 0) > 0,
+        this.stuckThresholdMs
+      );
+      const indicator = STATUS_INDICATORS[computed.status];
+      const nameLabel = isSelf ? `${a.name} (you)` : a.name;
+      const nameColored = isSelf
+        ? this.theme.fg("accent", nameLabel)
+        : coloredAgentName(a.name);
+
+      let rightSide = "";
+      let rightPlainText = "";
+      if (computed.status === "idle" && computed.idleFor) {
+        rightPlainText = `idle ${computed.idleFor}`;
+        rightSide = this.theme.fg("dim", rightPlainText);
+      } else if (computed.status === "away" && computed.idleFor) {
+        rightPlainText = `away ${computed.idleFor}`;
+        rightSide = this.theme.fg("dim", rightPlainText);
+      } else if (computed.status === "stuck") {
+        rightPlainText = "stuck";
+        rightSide = this.theme.fg("error", rightPlainText);
       }
 
-      const entries: Array<{ name: string; spec?: string; isSelf: boolean }> = agents.map(agent => ({
-        name: agent.name,
-        spec: agent.spec,
-        isSelf: false
-      }));
-      entries.push({ name: this.state.agentName, spec: this.state.spec, isSelf: true });
-
-      const groups = new Map<string, Array<{ name: string; isSelf: boolean }>>();
-      for (const entry of entries) {
-        const key = entry.spec ? displaySpecPath(entry.spec, process.cwd()) : "No spec";
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key)?.push({ name: entry.name, isSelf: entry.isSelf });
-      }
-
-      const mySpec = this.state.spec ? displaySpecPath(this.state.spec, process.cwd()) : undefined;
-      const specKeys = Array.from(groups.keys()).filter(key => groups.get(key)?.length);
-      const ordered = specKeys
-        .filter(key => key !== "No spec" && key !== mySpec)
-        .sort((a, b) => a.localeCompare(b));
-      if (mySpec && groups.get(mySpec)) ordered.unshift(mySpec);
-      if (groups.get("No spec")?.length) ordered.push("No spec");
-
-      for (const spec of ordered) {
-        lines.push(`${spec}:`);
-        const group = (groups.get(spec) ?? []).sort((a, b) => {
-          if (a.isSelf && !b.isSelf) return -1;
-          if (!a.isSelf && b.isSelf) return 1;
-          return a.name.localeCompare(b.name);
-        });
-        for (const entry of group) {
-          const claim = claimByAgent.get(entry.name);
-          const nameLabel = entry.isSelf ? `${entry.name} (you)` : entry.name;
-          const taskLabel = claim ? claim.taskId : "(idle)";
-          const reasonLabel = claim?.reason ? truncateToWidth(claim.reason, 24) : "";
-          const row = `  ${nameLabel.padEnd(20)} ${taskLabel.padEnd(10)} ${reasonLabel}`;
-          lines.push(truncateToWidth(row, width));
-        }
-        lines.push("");
-      }
-    } else {
-      const mode = getDisplayMode(agents);
-      if (mode === "same-folder-branch") {
-        const folder = extractFolder(agents[0].cwd);
-        const branch = agents.find(a => a.gitBranch)?.gitBranch;
-        const header = branch ? `Peers in ${folder} (${branch}):` : `Peers in ${folder}:`;
-        lines.push(header, "");
-      } else if (mode === "same-folder") {
-        const folder = extractFolder(agents[0].cwd);
-        lines.push(`Peers in ${folder}:`, "");
+      const headerLeft = `${indicator} ${nameColored}`;
+      if (rightSide) {
+        const headerLeftLen = visibleWidth(`${indicator} ${nameLabel}`);
+        const rightLen = visibleWidth(rightPlainText);
+        const gap = Math.max(1, width - headerLeftLen - rightLen);
+        lines.push(truncateToWidth(headerLeft + " ".repeat(gap) + rightSide, width));
       } else {
-        lines.push("Peers:", "");
+        lines.push(truncateToWidth(headerLeft, width));
       }
 
-      for (const agent of agents) {
-        const time = formatRelativeTime(agent.startedAt);
-        const branch = agent.gitBranch ?? "";
-        const folder = extractFolder(agent.cwd);
-        if (mode === "same-folder-branch") {
-          lines.push(`  ${agent.name.padEnd(14)} ${agent.model.padEnd(20)} ${time}`);
-        } else if (mode === "same-folder") {
-          lines.push(`  ${agent.name.padEnd(14)} ${branch.padEnd(12)} ${agent.model.padEnd(20)} ${time}`);
-        } else {
-          lines.push(`  ${agent.name.padEnd(14)} ${folder.padEnd(20)} ${branch.padEnd(12)} ${agent.model.padEnd(20)} ${time}`);
-        }
-        if (agent.reservations && agent.reservations.length > 0) {
-          for (const r of agent.reservations) {
-            lines.push(`                 🔒 ${truncatePathLeft(r.pattern, 40)}`);
-          }
+      const detailParts: string[] = [];
+      if (a.activity?.currentActivity) {
+        detailParts.push(a.activity.currentActivity);
+      }
+      const tools = a.session?.toolCalls ?? 0;
+      detailParts.push(`${tools} tools`);
+      const tokens = a.session?.tokens ?? 0;
+      detailParts.push(tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`);
+      if (a.reservations && a.reservations.length > 0) {
+        detailParts.push(`\u{1F4C1} ${a.reservations.map(r => r.pattern).join(", ")}`);
+      }
+      if (a.statusMessage) {
+        detailParts.push(a.statusMessage);
+      }
+      lines.push(truncateToWidth(`   ${detailParts.join(" - ")}`, width));
+      lines.push("");
+    };
+
+    renderCard(buildSelfRegistration(this.state), true);
+    for (const agent of agents) {
+      renderCard(agent, false);
+    }
+
+    const feedHeight = Math.max(0, height - lines.length - 1);
+    if (feedHeight > 1) {
+      const events = readFeedEvents(this.dirs, feedHeight);
+      if (events.length > 0) {
+        lines.push(this.theme.fg("dim", "Activity"));
+        for (const event of events.slice(-(feedHeight - 1))) {
+          lines.push(truncateToWidth(this.formatFeedLine(event), width));
         }
       }
     }
@@ -527,6 +549,10 @@ export class MessengerOverlay implements Component, Focusable {
     }
     while (lines.length < height) lines.push("");
     return lines;
+  }
+
+  private formatFeedLine(event: FeedEvent): string {
+    return this.theme.fg("dim", sharedFormatFeedLine(event));
   }
 
   private renderNoMessages(width: number, height: number, agents: AgentRegistration[]): string[] {
@@ -657,7 +683,7 @@ export class MessengerOverlay implements Component, Focusable {
 
     let placeholder: string;
     if (this.selectedAgent === AGENTS_TAB) {
-      placeholder = "Agents overview";
+      placeholder = "@name msg or broadcast...";
     } else if (this.selectedAgent === null) {
       placeholder = "Broadcast to all agents...";
     } else {

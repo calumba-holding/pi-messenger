@@ -19,12 +19,14 @@ import {
   type SpecCompletions,
   type AllClaims,
   type AllCompletions,
+  type NameThemeConfig,
   MAX_WATCHER_RETRIES,
   isProcessAlive,
   generateMemorableName,
   isValidAgentName,
   pathMatchesReservation,
 } from "./lib.js";
+import { logFeedEvent } from "./feed.js";
 
 // =============================================================================
 // Agents Cache (Fix 1: Reduce disk I/O)
@@ -207,6 +209,7 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
 
       if (!isProcessAlive(reg.pid)) {
         try {
+          logFeedEvent(dirs, reg.name, "leave");
           fs.unlinkSync(join(dirs.registry, file));
         } catch {
           // Ignore cleanup errors
@@ -214,6 +217,15 @@ export function getActiveAgents(state: MessengerState, dirs: Dirs): AgentRegistr
         continue;
       }
 
+      if (reg.session === undefined) {
+        reg.session = { toolCalls: 0, tokens: 0, filesModified: [] };
+      }
+      if (reg.activity === undefined) {
+        reg.activity = { lastActivityAt: reg.startedAt };
+      }
+      if (reg.isHuman === undefined) {
+        reg.isHuman = false;
+      }
       allAgents.push(reg);
     } catch {
       // Ignore malformed registrations
@@ -263,13 +275,13 @@ export function findAvailableName(baseName: string, dirs: Dirs): string | null {
   return null;
 }
 
-export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContext): boolean {
+export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContext, nameTheme?: NameThemeConfig): boolean {
   if (state.registered) return true;
 
   ensureDirSync(dirs.registry);
 
   if (!state.agentName) {
-    state.agentName = generateMemorableName();
+    state.agentName = generateMemorableName(nameTheme);
   }
 
   const isExplicitName = !!process.env.PI_AGENT_NAME;
@@ -321,15 +333,19 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
     ensureDirSync(getMyInbox(state, dirs));
 
     const gitBranch = getGitBranch(process.cwd());
+    const now = new Date().toISOString();
     const registration: AgentRegistration = {
       name: state.agentName,
       pid: process.pid,
       sessionId: ctx.sessionManager.getSessionId(),
       cwd: process.cwd(),
       model: ctx.model?.id ?? "unknown",
-      startedAt: new Date().toISOString(),
+      startedAt: now,
       gitBranch,
-      spec: state.spec
+      spec: state.spec,
+      isHuman: state.isHuman,
+      session: { ...state.session },
+      activity: { lastActivityAt: now },
     };
 
     try {
@@ -342,21 +358,20 @@ export function register(state: MessengerState, dirs: Dirs, ctx: ExtensionContex
       return false;
     }
 
-    // Verify we own the registration (guards against race condition where
-    // two agents try to claim the same name simultaneously)
     let verified = false;
     let verifyError = false;
     try {
       const written: AgentRegistration = JSON.parse(fs.readFileSync(regPath, "utf-8"));
       verified = written.pid === process.pid;
     } catch {
-      // Read failed - could be I/O error or file was overwritten/deleted
       verifyError = true;
     }
 
     if (verified) {
       state.registered = true;
+      state.model = ctx.model?.id ?? "unknown";
       state.gitBranch = gitBranch;
+      state.activity.lastActivityAt = now;
       invalidateAgentsCache();
       return true;
     }
@@ -400,13 +415,38 @@ export function updateRegistration(state: MessengerState, dirs: Dirs, ctx: Exten
 
   try {
     const reg: AgentRegistration = JSON.parse(fs.readFileSync(regPath, "utf-8"));
-    reg.model = ctx.model?.id ?? reg.model;
+    const currentModel = ctx.model?.id ?? reg.model;
+    reg.model = currentModel;
+    state.model = currentModel;
     reg.reservations = state.reservations.length > 0 ? state.reservations : undefined;
     if (state.spec) {
       reg.spec = state.spec;
     } else {
       delete reg.spec;
     }
+    reg.session = { ...state.session };
+    reg.activity = { ...state.activity };
+    reg.statusMessage = state.statusMessage;
+    fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
+  } catch {
+    // Ignore errors
+  }
+}
+
+export function flushActivityToRegistry(state: MessengerState, dirs: Dirs, ctx: ExtensionContext): void {
+  if (!state.registered) return;
+
+  const regPath = getRegistrationPath(state, dirs);
+  if (!fs.existsSync(regPath)) return;
+
+  try {
+    const reg: AgentRegistration = JSON.parse(fs.readFileSync(regPath, "utf-8"));
+    const currentModel = ctx.model?.id ?? reg.model;
+    reg.model = currentModel;
+    state.model = currentModel;
+    reg.session = { ...state.session };
+    reg.activity = { ...state.activity };
+    reg.statusMessage = state.statusMessage;
     fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
   } catch {
     // Ignore errors
@@ -468,16 +508,21 @@ export function renameAgent(
   processAllPendingMessages(state, dirs, deliverFn);
 
   const gitBranch = getGitBranch(process.cwd());
+  const now = new Date().toISOString();
   const registration: AgentRegistration = {
     name: newName,
     pid: process.pid,
     sessionId: ctx.sessionManager.getSessionId(),
     cwd: process.cwd(),
     model: ctx.model?.id ?? "unknown",
-    startedAt: new Date().toISOString(),
+    startedAt: now,
     reservations: state.reservations.length > 0 ? state.reservations : undefined,
     gitBranch,
-    spec: state.spec
+    spec: state.spec,
+    isHuman: state.isHuman,
+    session: { ...state.session },
+    activity: { lastActivityAt: now },
+    statusMessage: state.statusMessage,
   };
 
   ensureDirSync(dirs.registry);
@@ -543,7 +588,10 @@ export function renameAgent(
     // Ignore - might have new messages or not exist
   }
 
+  state.model = ctx.model?.id ?? "unknown";
   state.gitBranch = gitBranch;
+  state.sessionStartedAt = now;
+  state.activity.lastActivityAt = now;
   invalidateAgentsCache();
   return { success: true, oldName, newName };
 }

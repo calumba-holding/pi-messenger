@@ -21,6 +21,9 @@ import {
   stripAnsiCodes,
   extractFolder,
   displaySpecPath,
+  generateAutoStatus,
+  computeStatus,
+  agentHasTask,
 } from "./lib.js";
 import * as store from "./store.js";
 import * as handlers from "./handlers.js";
@@ -28,6 +31,7 @@ import { MessengerOverlay } from "./overlay.js";
 import { MessengerConfigOverlay } from "./config-overlay.js";
 import { loadConfig, matchesAutoRegisterPath, type MessengerConfig } from "./config.js";
 import { executeCrewAction } from "./crew/index.js";
+import { logFeedEvent, pruneFeed } from "./feed.js";
 import type { CrewParams } from "./crew/types.js";
 import { autonomousState, restoreAutonomousState, stopAutonomous } from "./crew/state.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
@@ -54,10 +58,20 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     unreadCounts: new Map(),
     broadcastHistory: [],
     seenSenders: new Map(),
+    model: "",
     gitBranch: undefined,
     spec: undefined,
-    scopeToFolder: config.scopeToFolder
+    scopeToFolder: config.scopeToFolder,
+    isHuman: false,
+    session: { toolCalls: 0, tokens: 0, filesModified: [] },
+    activity: { lastActivityAt: new Date().toISOString() },
+    statusMessage: undefined,
+    customStatus: false,
+    registryFlushTimer: null,
+    sessionStartedAt: new Date().toISOString(),
   };
+
+  const nameTheme = { theme: config.nameTheme, customWords: config.nameWords };
 
   const baseDir = process.env.PI_MESSENGER_DIR || join(homedir(), ".pi/agent/messenger");
   const dirs: Dirs = {
@@ -128,21 +142,72 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   }
 
   // ===========================================================================
+  // Stuck Detection
+  // ===========================================================================
+
+  const notifiedStuck = new Set<string>();
+
+  function checkStuckAgents(ctx: ExtensionContext): void {
+    if (!config.stuckNotify || !ctx.hasUI || !state.registered) return;
+
+    const thresholdMs = config.stuckThreshold * 1000;
+    const peers = store.getActiveAgents(state, dirs);
+    const allClaims = store.getClaims(dirs);
+
+    const currentlyStuck = new Set<string>();
+
+    for (const agent of peers) {
+      const hasTask = agentHasTask(agent.name, allClaims, crewStore.getTasks(agent.cwd));
+      const computed = computeStatus(
+        agent.activity?.lastActivityAt ?? agent.startedAt,
+        hasTask,
+        (agent.reservations?.length ?? 0) > 0,
+        thresholdMs
+      );
+
+      if (computed.status === "stuck") {
+        currentlyStuck.add(agent.name);
+
+        if (!notifiedStuck.has(agent.name)) {
+          notifiedStuck.add(agent.name);
+          logFeedEvent(dirs, agent.name, "stuck");
+
+          const idleStr = computed.idleFor ?? "unknown";
+          const taskInfo = hasTask ? " with task in progress" : " with reservation";
+          ctx.ui.notify(`\u26A0\uFE0F ${agent.name} appears stuck (idle ${idleStr}${taskInfo})`, "warning");
+        }
+      }
+    }
+
+    for (const name of notifiedStuck) {
+      if (!currentlyStuck.has(name)) {
+        notifiedStuck.delete(name);
+      }
+    }
+  }
+
+  // ===========================================================================
   // Status
   // ===========================================================================
 
   function updateStatus(ctx: ExtensionContext): void {
     if (!ctx.hasUI || !state.registered) return;
 
+    checkStuckAgents(ctx);
+
     const agents = store.getActiveAgents(state, dirs);
     const activeNames = new Set(agents.map(a => a.name));
     const count = agents.length;
     const theme = ctx.ui.theme;
 
-    // Clear unread counts for agents that are no longer active
     for (const name of state.unreadCounts.keys()) {
       if (!activeNames.has(name)) {
         state.unreadCounts.delete(name);
+      }
+    }
+    for (const name of notifiedStuck) {
+      if (!activeNames.has(name)) {
+        notifiedStuck.delete(name);
       }
     }
 
@@ -180,7 +245,10 @@ Usage (action-based API - preferred):
   // Coordination
   pi_messenger({ action: "join" })                              → Join mesh
   pi_messenger({ action: "status" })                            → Get status
-  pi_messenger({ action: "list" })                              → List agents
+  pi_messenger({ action: "list" })                              → List agents with presence
+  pi_messenger({ action: "feed", limit: 20 })                   → Activity feed
+  pi_messenger({ action: "whois", name: "AgentName" })          → Agent details
+  pi_messenger({ action: "set_status", message: "reviewing" })  → Set custom status
   pi_messenger({ action: "reserve", paths: ["src/"] })          → Reserve files
   pi_messenger({ action: "send", to: "Agent", message: "hi" })  → Send message
   
@@ -236,6 +304,7 @@ Mode: action (if provided) > legacy key-based routing`,
       autonomous: Type.Optional(Type.Boolean({ description: "Run work continuously until done/blocked" })),
       concurrency: Type.Optional(Type.Number({ description: "Override worker concurrency" })),
       cascade: Type.Optional(Type.Boolean({ description: "For task.reset - also reset dependent tasks" })),
+      limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
       paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
       name: Type.Optional(Type.String({ description: "New name for rename action" })),
 
@@ -254,7 +323,7 @@ Mode: action (if provided) > legacy key-based routing`,
       message: Type.Optional(Type.String({ description: "Message to send" })),
       replyTo: Type.Optional(Type.String({ description: "Message ID if this is a reply" })),
       reserve: Type.Optional(Type.Array(Type.String(), { description: "Paths to reserve (legacy - use action: 'reserve' with paths)" })),
-      reason: Type.Optional(Type.String({ description: "Reason for reservation or claim" })),
+      reason: Type.Optional(Type.String({ description: "Reason for reservation, claim, or task block" })),
       release: Type.Optional(Type.Any({ description: "Patterns to release (array) or true to release all (legacy)" })),
       rename: Type.Optional(Type.String({ description: "Rename yourself (legacy - use action: 'rename' with name)" })),
       autoRegisterPath: Type.Optional(StringEnum(["add", "remove", "list"], { description: "Manage auto-register paths: add/remove current folder, or list all" })),
@@ -279,6 +348,7 @@ Mode: action (if provided) > legacy key-based routing`,
       rename?: string;
       autoRegisterPath?: "add" | "remove" | "list";
       list?: boolean;
+      limit?: number;
     }, _onUpdate, ctx, _signal) {
       const {
         action,
@@ -313,7 +383,8 @@ Mode: action (if provided) > legacy key-based routing`,
           ctx,
           deliverMessage,
           updateStatus,
-          (type, data) => pi.appendEntry(type, data)
+          (type, data) => pi.appendEntry(type, data),
+          { stuckThreshold: config.stuckThreshold, crewEventsInFeed: config.crewEventsInFeed, nameTheme, feedRetention: config.feedRetention }
         );
       }
 
@@ -323,7 +394,7 @@ Mode: action (if provided) > legacy key-based routing`,
 
       // Join doesn't require registration
       if (join) {
-        const joinResult = handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, spec);
+        const joinResult = handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, spec, nameTheme, config.feedRetention);
         
         // Send registration context after successful join (if configured)
         if (state.registered && config.registrationContext) {
@@ -361,7 +432,7 @@ Mode: action (if provided) > legacy key-based routing`,
         return handlers.executeRelease(state, dirs, ctx, release);
       }
       if (rename) return handlers.executeRename(state, dirs, ctx, rename, deliverMessage, updateStatus);
-      if (list) return handlers.executeList(state, dirs);
+      if (list) return handlers.executeList(state, dirs, { stuckThreshold: config.stuckThreshold });
       return handlers.executeStatus(state, dirs);
     }
   });
@@ -388,7 +459,7 @@ Mode: action (if provided) > legacy key-based routing`,
 
       // /messenger - open chat overlay (auto-joins if not registered)
       if (!state.registered) {
-        if (!store.register(state, dirs, ctx)) {
+        if (!store.register(state, dirs, ctx, nameTheme)) {
           ctx.ui.notify("Failed to join agent mesh", "error");
           return;
         }
@@ -441,28 +512,212 @@ Mode: action (if provided) > legacy key-based routing`,
   });
 
   // ===========================================================================
+  // Activity Tracking
+  // ===========================================================================
+
+  const EDIT_DEBOUNCE_MS = 5000;
+  const REGISTRY_FLUSH_MS = 10000;
+  const RECENT_WINDOW_MS = 60_000;
+  const pendingEdits = new Map<string, ReturnType<typeof setTimeout>>();
+  let recentCommit = false;
+  let recentCommitTimer: ReturnType<typeof setTimeout> | null = null;
+  let recentTestRuns = 0;
+  let recentTestTimer: ReturnType<typeof setTimeout> | null = null;
+  let recentEdits = 0;
+  let recentEditTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function updateLastActivity(): void {
+    state.activity.lastActivityAt = new Date().toISOString();
+  }
+
+  function incrementToolCount(): void {
+    state.session.toolCalls++;
+  }
+
+  function setCurrentActivity(activity: string): void {
+    state.activity.currentActivity = activity;
+  }
+
+  function clearCurrentActivity(): void {
+    state.activity.currentActivity = undefined;
+  }
+
+  function setLastToolCall(toolCall: string): void {
+    state.activity.lastToolCall = toolCall;
+  }
+
+  function addModifiedFile(filePath: string): void {
+    const files = state.session.filesModified;
+    const idx = files.indexOf(filePath);
+    if (idx !== -1) files.splice(idx, 1);
+    files.push(filePath);
+    if (files.length > 20) files.shift();
+  }
+
+  function debouncedLogEdit(filePath: string): void {
+    const existing = pendingEdits.get(filePath);
+    if (existing) clearTimeout(existing);
+    pendingEdits.set(filePath, setTimeout(() => {
+      logFeedEvent(dirs, state.agentName, "edit", filePath);
+      pendingEdits.delete(filePath);
+    }, EDIT_DEBOUNCE_MS));
+  }
+
+  function scheduleRegistryFlush(ctx: ExtensionContext): void {
+    if (state.registryFlushTimer) return;
+    state.registryFlushTimer = setTimeout(() => {
+      state.registryFlushTimer = null;
+      store.flushActivityToRegistry(state, dirs, ctx);
+    }, REGISTRY_FLUSH_MS);
+  }
+
+  function isGitCommit(command: string): boolean {
+    return /\bgit\s+commit\b/.test(command);
+  }
+
+  function isTestRun(command: string): boolean {
+    return /\b(npm\s+test|npx\s+(jest|vitest|mocha)|pytest|go\s+test|cargo\s+test|bun\s+test)\b/.test(command);
+  }
+
+  function extractCommitMessage(command: string): string {
+    const match = command.match(/-m\s+["']([^"']+)["']/);
+    return match ? match[1] : "";
+  }
+
+  function updateAutoStatus(): void {
+    if (!state.registered || !config.autoStatus || state.customStatus) return;
+
+    const autoMsg = generateAutoStatus({
+      currentActivity: state.activity.currentActivity,
+      recentCommit,
+      recentTestRuns,
+      recentEdits,
+      sessionStartedAt: state.sessionStartedAt,
+    });
+
+    state.statusMessage = autoMsg;
+  }
+
+  function trackRecentCommit(): void {
+    recentCommit = true;
+    if (recentCommitTimer) clearTimeout(recentCommitTimer);
+    recentCommitTimer = setTimeout(() => { recentCommit = false; }, RECENT_WINDOW_MS);
+  }
+
+  function trackRecentTest(): void {
+    recentTestRuns++;
+    if (recentTestTimer) clearTimeout(recentTestTimer);
+    recentTestTimer = setTimeout(() => { recentTestRuns = 0; }, RECENT_WINDOW_MS);
+  }
+
+  function trackRecentEdit(): void {
+    recentEdits++;
+    if (recentEditTimer) clearTimeout(recentEditTimer);
+    recentEditTimer = setTimeout(() => { recentEdits = 0; }, RECENT_WINDOW_MS);
+  }
+
+  function shortenPath(filePath: string): string {
+    const parts = filePath.split("/");
+    return parts.length > 2 ? parts.slice(-2).join("/") : filePath;
+  }
+
+  pi.on("tool_call", async (event, ctx) => {
+    if (!state.registered) return;
+
+    updateLastActivity();
+    incrementToolCount();
+    scheduleRegistryFlush(ctx);
+
+    const toolName = event.toolName;
+    const input = event.input as Record<string, unknown>;
+
+    if (toolName === "write" || toolName === "edit") {
+      const path = input.path as string;
+      if (path) {
+        setCurrentActivity(`editing ${shortenPath(path)}`);
+        debouncedLogEdit(path);
+        trackRecentEdit();
+      }
+    } else if (toolName === "read") {
+      const path = input.path as string;
+      if (path) {
+        setCurrentActivity(`reading ${shortenPath(path)}`);
+      }
+    } else if (toolName === "bash") {
+      const command = input.command as string;
+      if (command) {
+        if (isGitCommit(command)) {
+          setCurrentActivity("committing");
+        } else if (isTestRun(command)) {
+          setCurrentActivity("running tests");
+        }
+      }
+    }
+
+    updateAutoStatus();
+  });
+
+  pi.on("tool_result", async (event, ctx) => {
+    if (!state.registered) return;
+
+    const toolName = event.toolName;
+    const input = event.input as Record<string, unknown>;
+
+    if (toolName === "write" || toolName === "edit") {
+      const path = input.path as string;
+      if (path) {
+        setLastToolCall(`${toolName}: ${shortenPath(path)}`);
+        addModifiedFile(path);
+      }
+    }
+
+    if (toolName === "bash") {
+      const command = input.command as string;
+      if (command) {
+        if (isGitCommit(command)) {
+          const msg = extractCommitMessage(command);
+          logFeedEvent(dirs, state.agentName, "commit", undefined, msg);
+          setLastToolCall(`commit: ${msg}`);
+          trackRecentCommit();
+        }
+        if (isTestRun(command)) {
+          const passed = !event.isError;
+          logFeedEvent(dirs, state.agentName, "test", undefined, passed ? "passed" : "failed");
+          setLastToolCall(`test: ${passed ? "passed" : "failed"}`);
+          trackRecentTest();
+        }
+      }
+    }
+
+    clearCurrentActivity();
+    updateAutoStatus();
+    scheduleRegistryFlush(ctx);
+  });
+
+  // ===========================================================================
   // Event Handlers
   // ===========================================================================
 
   pi.on("session_start", async (_event, ctx) => {
-    // Restore crew autonomous state from session entries
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type === "custom" && entry.customType === "crew-state") {
         restoreAutonomousState(entry.data as Parameters<typeof restoreAutonomousState>[0]);
       }
     }
 
-    // Check if auto-register is enabled (global or path-based)
+    state.isHuman = ctx.hasUI;
+
     const shouldAutoRegister = config.autoRegister || 
       matchesAutoRegisterPath(process.cwd(), config.autoRegisterPaths);
     
     if (!shouldAutoRegister) return;
 
-    if (store.register(state, dirs, ctx)) {
+    if (store.register(state, dirs, ctx, nameTheme)) {
       store.startWatcher(state, dirs, deliverMessage);
       updateStatus(ctx);
+      pruneFeed(dirs, config.feedRetention);
+      logFeedEvent(dirs, state.agentName, "join");
 
-      // Send registration context (non-displaying, non-triggering)
       if (config.registrationContext) {
         const folder = extractFolder(process.cwd());
         const locationPart = state.gitBranch
@@ -495,10 +750,22 @@ Mode: action (if provided) > legacy key-based routing`,
   });
   pi.on("session_tree", async (_event, ctx) => updateStatus(ctx));
 
-  pi.on("turn_end", async (_event, ctx) => {
+  pi.on("turn_end", async (event, ctx) => {
     store.processAllPendingMessages(state, dirs, deliverMessage);
     recoverWatcherIfNeeded();
     updateStatus(ctx);
+
+    if (state.registered) {
+      const msg = event.message as unknown as Record<string, unknown> | undefined;
+      if (msg && msg.role === "assistant" && msg.usage) {
+        const usage = msg.usage as { totalTokens?: number; input?: number; output?: number };
+        const total = usage.totalTokens ?? ((usage.input ?? 0) + (usage.output ?? 0));
+        if (total > 0) {
+          state.session.tokens += total;
+          scheduleRegistryFlush(ctx);
+        }
+      }
+    }
   });
 
   // ===========================================================================
@@ -557,6 +824,20 @@ Mode: action (if provided) > legacy key-based routing`,
   });
 
   pi.on("session_shutdown", async () => {
+    if (state.registered) {
+      logFeedEvent(dirs, state.agentName, "leave");
+    }
+    if (state.registryFlushTimer) {
+      clearTimeout(state.registryFlushTimer);
+      state.registryFlushTimer = null;
+    }
+    for (const timer of pendingEdits.values()) {
+      clearTimeout(timer);
+    }
+    pendingEdits.clear();
+    if (recentCommitTimer) { clearTimeout(recentCommitTimer); recentCommitTimer = null; }
+    if (recentTestTimer) { clearTimeout(recentTestTimer); recentTestTimer = null; }
+    if (recentEditTimer) { clearTimeout(recentEditTimer); recentEditTimer = null; }
     store.stopWatcher(state);
     store.unregister(state, dirs);
   });

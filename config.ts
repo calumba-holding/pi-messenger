@@ -13,20 +13,20 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export interface MessengerConfig {
-  // Auto-register on startup (default: false - require explicit join)
   autoRegister: boolean;
-  // Paths where auto-register is enabled (when autoRegister is false)
   autoRegisterPaths: string[];
-  // Only see agents in the same folder (default: false)
   scopeToFolder: boolean;
-  // Context injection
   contextMode: "full" | "minimal" | "none";
-  // Registration message (sent once on joining)
   registrationContext: boolean;
-  // Include reply hint in messages
   replyHint: boolean;
-  // Include sender details on first message from each agent
   senderDetailsOnFirstContact: boolean;
+  nameTheme: string;
+  nameWords?: { adjectives: string[]; nouns: string[] };
+  feedRetention: number;
+  stuckThreshold: number;
+  stuckNotify: boolean;
+  autoStatus: boolean;
+  crewEventsInFeed: boolean;
 }
 
 const DEFAULT_CONFIG: MessengerConfig = {
@@ -37,6 +37,12 @@ const DEFAULT_CONFIG: MessengerConfig = {
   registrationContext: true,
   replyHint: true,
   senderDetailsOnFirstContact: true,
+  nameTheme: "default",
+  feedRetention: 50,
+  stuckThreshold: 900,
+  stuckNotify: true,
+  autoStatus: true,
+  crewEventsInFeed: true,
 };
 
 function readJsonFile(path: string): Record<string, unknown> | null {
@@ -140,7 +146,18 @@ export function loadConfig(cwd: string): MessengerConfig {
     ...(projectConfig ?? {}) 
   };
 
-  // Apply contextMode shortcuts
+  const nameWords = (merged as Record<string, unknown>).nameWords as { adjectives: string[]; nouns: string[] } | undefined;
+
+  const sharedFields = {
+    nameTheme: typeof merged.nameTheme === "string" ? merged.nameTheme : DEFAULT_CONFIG.nameTheme,
+    nameWords: nameWords && Array.isArray(nameWords.adjectives) && Array.isArray(nameWords.nouns) ? nameWords : undefined,
+    feedRetention: typeof merged.feedRetention === "number" ? merged.feedRetention : DEFAULT_CONFIG.feedRetention,
+    stuckThreshold: typeof merged.stuckThreshold === "number" ? merged.stuckThreshold : DEFAULT_CONFIG.stuckThreshold,
+    stuckNotify: merged.stuckNotify !== false,
+    autoStatus: merged.autoStatus !== false,
+    crewEventsInFeed: merged.crewEventsInFeed !== false,
+  };
+
   if (merged.contextMode === "none") {
     return {
       autoRegister: merged.autoRegister === true,
@@ -150,6 +167,7 @@ export function loadConfig(cwd: string): MessengerConfig {
       registrationContext: false,
       replyHint: false,
       senderDetailsOnFirstContact: false,
+      ...sharedFields,
     };
   }
 
@@ -162,10 +180,10 @@ export function loadConfig(cwd: string): MessengerConfig {
       registrationContext: false,
       replyHint: true,
       senderDetailsOnFirstContact: false,
+      ...sharedFields,
     };
   }
 
-  // "full" mode uses individual settings
   return {
     autoRegister: merged.autoRegister === true,
     autoRegisterPaths: Array.isArray(merged.autoRegisterPaths) ? merged.autoRegisterPaths : [],
@@ -174,5 +192,6 @@ export function loadConfig(cwd: string): MessengerConfig {
     registrationContext: merged.registrationContext !== false,
     replyHint: merged.replyHint !== false,
     senderDetailsOnFirstContact: merged.senderDetailsOnFirstContact !== false,
+    ...sharedFields,
   };
 }

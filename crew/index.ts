@@ -6,7 +6,7 @@
  */
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { MessengerState, Dirs, AgentMailMessage } from "../lib.js";
+import type { MessengerState, Dirs, AgentMailMessage, NameThemeConfig } from "../lib.js";
 import * as handlers from "../handlers.js";
 import type { CrewParams, AppendEntryFn } from "./types.js";
 import { result } from "./utils/result.js";
@@ -19,6 +19,13 @@ type UpdateStatusFn = (ctx: ExtensionContext) => void;
 function ensureCrewInstalled() {
   ensureAgentsInstalled();
   ensureSkillsInstalled();
+}
+
+export interface CrewActionConfig {
+  stuckThreshold?: number;
+  crewEventsInFeed?: boolean;
+  nameTheme?: NameThemeConfig;
+  feedRetention?: number;
 }
 
 /**
@@ -34,7 +41,8 @@ export async function executeCrewAction(
   ctx: ExtensionContext,
   deliverMessage: DeliverFn,
   updateStatus: UpdateStatusFn,
-  appendEntry: AppendEntryFn
+  appendEntry: AppendEntryFn,
+  config?: CrewActionConfig
 ) {
   // Parse action: "task.show" → group="task", op="show"
   const dotIndex = action.indexOf('.');
@@ -47,7 +55,7 @@ export async function executeCrewAction(
 
   // join - this is how you register
   if (group === 'join') {
-    return handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, params.spec);
+    return handlers.executeJoin(state, dirs, ctx, deliverMessage, updateStatus, params.spec, config?.nameTheme, config?.feedRetention);
   }
 
   // autoRegisterPath - config management, not agent operation
@@ -82,7 +90,22 @@ export async function executeCrewAction(
     }
 
     case 'list':
-      return handlers.executeList(state, dirs);
+      return handlers.executeList(state, dirs, { stuckThreshold: config?.stuckThreshold });
+
+    case 'whois': {
+      if (!params.name) {
+        return result("Error: name required for whois action.", { mode: "whois", error: "missing_name" });
+      }
+      return handlers.executeWhois(state, dirs, params.name, { stuckThreshold: config?.stuckThreshold });
+    }
+
+    case 'set_status': {
+      return handlers.executeSetStatus(state, dirs, ctx, params.message);
+    }
+
+    case 'feed': {
+      return handlers.executeFeed(dirs, params.limit, config?.crewEventsInFeed ?? true);
+    }
 
     case 'spec':
       if (!params.spec) {

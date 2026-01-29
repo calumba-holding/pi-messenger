@@ -162,9 +162,3 @@ export function discoverCrewAgents(cwd: string): CrewAgentConfig[] {
   return discoverAgents(cwd, "both").agents.filter(a => a.crewRole !== undefined);
 }
 
-/**
- * Get crew agents filtered by role.
- */
-export function getAgentsByRole(cwd: string, role: CrewRole): CrewAgentConfig[] {
-  return discoverCrewAgents(cwd).filter(a => a.crewRole === role);
-}

@@ -9,17 +9,23 @@ import {
   type Dirs,
   type AgentMailMessage,
   type AgentRegistration,
+  type NameThemeConfig,
   type SpecClaims,
   type SpecCompletions,
-  formatRelativeTime,
   extractFolder,
   truncatePathLeft,
-  getDisplayMode,
   displaySpecPath,
-  resolveSpecPath
+  resolveSpecPath,
+  computeStatus,
+  STATUS_INDICATORS,
+  formatDuration,
+  buildSelfRegistration,
+  agentHasTask,
 } from "./lib.js";
 import * as store from "./store.js";
+import * as crewStore from "./crew/store.js";
 import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.js";
+import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.js";
 
 // =============================================================================
 // Tool Result Helper
@@ -53,7 +59,9 @@ export function executeJoin(
   ctx: ExtensionContext,
   deliverFn: (msg: AgentMailMessage) => void,
   updateStatusFn: (ctx: ExtensionContext) => void,
-  specPath?: string
+  specPath?: string,
+  nameTheme?: NameThemeConfig,
+  feedRetention?: number
 ) {
   if (state.registered) {
     const agents = store.getActiveAgents(state, dirs);
@@ -63,7 +71,9 @@ export function executeJoin(
     );
   }
 
-  if (!store.register(state, dirs, ctx)) {
+  state.isHuman = ctx.hasUI;
+
+  if (!store.register(state, dirs, ctx, nameTheme)) {
     return result(
       "Failed to join the agent mesh. Check logs for details.",
       { mode: "join", error: "registration_failed" }
@@ -72,6 +82,8 @@ export function executeJoin(
 
   store.startWatcher(state, dirs, deliverFn);
   updateStatusFn(ctx);
+  pruneFeed(dirs, feedRetention ?? 50);
+  logFeedEvent(dirs, state.agentName, "join");
 
   let specWarning = "";
   if (specPath) {
@@ -157,111 +169,85 @@ export function executeStatus(state: MessengerState, dirs: Dirs) {
   });
 }
 
-export function executeList(state: MessengerState, dirs: Dirs) {
+export function executeList(state: MessengerState, dirs: Dirs, config?: { stuckThreshold?: number }) {
   if (!state.registered) {
     return notRegisteredError();
   }
 
-  const agents = store.getActiveAgents(state, dirs);
-
-  if (agents.length === 0) {
-    return result(
-      "No other agents currently active.",
-      { mode: "list", registered: true, agents: [], self: state.agentName, agentClaims: {} }
-    );
-  }
+  const thresholdMs = (config?.stuckThreshold ?? 900) * 1000;
+  const peers = store.getActiveAgents(state, dirs);
+  const folder = extractFolder(process.cwd());
+  const totalCount = peers.length + 1;
 
   const lines: string[] = [];
-  const hasAnySpec = !!state.spec || agents.some(a => a.spec);
-  const allClaims = store.getClaims(dirs);
-  const agentClaims: Record<string, { spec: string; taskId: string; reason?: string }> = {};
+  lines.push(`# Agents (${totalCount} online - project: ${folder})`, "");
 
-  for (const [specPath, tasks] of Object.entries(allClaims)) {
-    for (const [taskId, claim] of Object.entries(tasks)) {
-      if (claim.agent !== state.agentName) {
-        agentClaims[claim.agent] = {
-          spec: displaySpecPath(specPath, process.cwd()),
-          taskId,
-          reason: claim.reason
-        };
-      }
+  function formatAgentLine(
+    a: AgentRegistration,
+    isSelf: boolean,
+    hasTask: boolean
+  ): string {
+    const computed = computeStatus(
+      a.activity?.lastActivityAt ?? a.startedAt,
+      hasTask,
+      (a.reservations?.length ?? 0) > 0,
+      thresholdMs
+    );
+    const indicator = STATUS_INDICATORS[computed.status];
+    const nameLabel = isSelf ? `${a.name} (you)` : a.name;
+
+    const parts: string[] = [`${indicator} ${nameLabel}`];
+
+    if (a.activity?.currentActivity) {
+      parts.push(a.activity.currentActivity);
+    } else if (computed.status === "idle" && computed.idleFor) {
+      parts.push(`idle ${computed.idleFor}`);
+    } else if (computed.status === "away" && computed.idleFor) {
+      parts.push(`away ${computed.idleFor}`);
+    } else if (computed.status === "stuck" && computed.idleFor) {
+      parts.push(`stuck ${computed.idleFor}`);
     }
-  }
 
-  function formatReservations(a: AgentRegistration): string[] {
-    if (!a.reservations || a.reservations.length === 0) return [];
-    return a.reservations.map(r => `🔒 ${truncatePathLeft(r.pattern, 40)}`);
-  }
+    parts.push(`${a.session?.toolCalls ?? 0} tools`);
 
-  if (hasAnySpec) {
-    const bySpec: Record<string, AgentRegistration[]> = { "No spec": [] };
-    for (const a of agents) {
-      const key = a.spec ? displaySpecPath(a.spec, process.cwd()) : "No spec";
-      if (!bySpec[key]) bySpec[key] = [];
-      bySpec[key].push(a);
-    }
-
-    const specKeys = Object.keys(bySpec).filter(key => bySpec[key].length > 0);
-    const sortedKeys = specKeys
-      .filter(key => key !== "No spec")
-      .sort((a, b) => a.localeCompare(b));
-    if (bySpec["No spec"].length > 0) sortedKeys.push("No spec");
-
-    for (const spec of sortedKeys) {
-      lines.push(`${spec}:`);
-      for (const a of bySpec[spec]) {
-        const claim = agentClaims[a.name];
-        const claimStr = claim ? claim.taskId : "(idle)";
-        const time = formatRelativeTime(a.startedAt);
-        lines.push(`  ${a.name.padEnd(14)} ${claimStr.padEnd(10)} ${a.model.padEnd(18)} ${time}`);
-      }
-      lines.push("");
-    }
-  } else {
-    const mode = getDisplayMode(agents);
-    if (mode === "same-folder-branch") {
-      const folder = extractFolder(agents[0].cwd);
-      const branch = agents.find(a => a.gitBranch)?.gitBranch;
-      const header = branch ? `Peers in ${folder} (${branch}):` : `Peers in ${folder}:`;
-      lines.push(header, "");
-
-      for (const a of agents) {
-        const time = formatRelativeTime(a.startedAt);
-        lines.push(`  ${a.name.padEnd(14)} ${a.model.padEnd(20)} ${time}`);
-        for (const res of formatReservations(a)) {
-          lines.push(`                 ${res}`);
-        }
-      }
-    } else if (mode === "same-folder") {
-      const folder = extractFolder(agents[0].cwd);
-      lines.push(`Peers in ${folder}:`, "");
-
-      for (const a of agents) {
-        const branch = a.gitBranch ?? "";
-        const time = formatRelativeTime(a.startedAt);
-        lines.push(`  ${a.name.padEnd(14)} ${branch.padEnd(12)} ${a.model.padEnd(20)} ${time}`);
-        for (const res of formatReservations(a)) {
-          lines.push(`                 ${res}`);
-        }
-      }
+    const tokens = a.session?.tokens ?? 0;
+    if (tokens >= 1000) {
+      parts.push(`${(tokens / 1000).toFixed(1)}k`);
     } else {
-      lines.push("Peers:", "");
+      parts.push(`${tokens}`);
+    }
 
-      for (const a of agents) {
-        const folder = extractFolder(a.cwd);
-        const branch = a.gitBranch ?? "";
-        const time = formatRelativeTime(a.startedAt);
-        lines.push(`  ${a.name.padEnd(14)} ${folder.padEnd(20)} ${branch.padEnd(12)} ${a.model.padEnd(20)} ${time}`);
-        for (const res of formatReservations(a)) {
-          lines.push(`                 ${res}`);
-        }
-      }
+    if (a.reservations && a.reservations.length > 0) {
+      const resParts = a.reservations.map(r => r.pattern).join(", ");
+      parts.push(`\u{1F4C1} ${resParts}`);
+    }
+
+    if (a.statusMessage) {
+      parts.push(a.statusMessage);
+    }
+
+    return parts.join(" - ");
+  }
+
+  const allClaims = store.getClaims(dirs);
+
+  lines.push(formatAgentLine(buildSelfRegistration(state), true, agentHasTask(state.agentName, allClaims, crewStore.getTasks(process.cwd()))));
+
+  for (const a of peers) {
+    lines.push(formatAgentLine(a, false, agentHasTask(a.name, allClaims, crewStore.getTasks(a.cwd))));
+  }
+
+  const recentEvents = readFeedEvents(dirs, 5);
+  if (recentEvents.length > 0) {
+    lines.push("", "# Recent Activity", "");
+    for (const event of recentEvents) {
+      lines.push(formatFeedLine(event));
     }
   }
 
   return result(
     lines.join("\n").trim(),
-    { mode: "list", registered: true, agents, self: state.agentName, agentClaims }
+    { mode: "list", registered: true, agents: peers, self: state.agentName, totalCount }
   );
 }
 
@@ -348,6 +334,15 @@ export function executeSend(
     );
   }
 
+  const preview = message.length > 60 ? message.slice(0, 57) + "..." : message;
+  if (broadcast) {
+    logFeedEvent(dirs, state.agentName, "message", undefined, `broadcast: "${preview}"`);
+  } else {
+    for (const name of sent) {
+      logFeedEvent(dirs, state.agentName, "message", name, `\u2192 ${name}: "${preview}"`);
+    }
+  }
+
   let text = `Message sent to ${sent.join(", ")}.`;
   if (failed.length > 0) {
     const failedStr = failed.map(f => `${f.name} (${f.error})`).join(", ");
@@ -384,6 +379,10 @@ export function executeReserve(
 
   store.updateRegistration(state, dirs, ctx);
 
+  for (const pattern of patterns) {
+    logFeedEvent(dirs, state.agentName, "reserve", pattern, reason);
+  }
+
   return result(`Reserved: ${patterns.join(", ")}`, { mode: "reserve", patterns, reason });
 }
 
@@ -401,6 +400,9 @@ export function executeRelease(
     const released = state.reservations.map(r => r.pattern);
     state.reservations = [];
     store.updateRegistration(state, dirs, ctx);
+    for (const pattern of released) {
+      logFeedEvent(dirs, state.agentName, "release", pattern);
+    }
     return result(
       released.length > 0 ? `Released all: ${released.join(", ")}` : "No reservations to release.",
       { mode: "release", released }
@@ -408,13 +410,15 @@ export function executeRelease(
   }
 
   const patterns = release;
-  const before = state.reservations.length;
+  const releasedPatterns = state.reservations.filter(r => patterns.includes(r.pattern)).map(r => r.pattern);
   state.reservations = state.reservations.filter(r => !patterns.includes(r.pattern));
-  const releasedCount = before - state.reservations.length;
 
   store.updateRegistration(state, dirs, ctx);
+  for (const pattern of releasedPatterns) {
+    logFeedEvent(dirs, state.agentName, "release", pattern);
+  }
 
-  return result(`Released ${releasedCount} reservation(s).`, { mode: "release", released: patterns });
+  return result(`Released ${releasedPatterns.length} reservation(s).`, { mode: "release", released: releasedPatterns });
 }
 
 export function executeRename(
@@ -718,6 +722,161 @@ export function executeSwarm(
     yourClaim: myClaim?.taskId,
     specs: specsData
   });
+}
+
+export function executeSetStatus(
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+  message?: string
+) {
+  if (!state.registered) {
+    return notRegisteredError();
+  }
+
+  if (!message || message.trim() === "") {
+    state.statusMessage = undefined;
+    state.customStatus = false;
+    store.updateRegistration(state, dirs, ctx);
+    return result(
+      "Custom status cleared. Auto-status will resume.",
+      { mode: "set_status", cleared: true }
+    );
+  }
+
+  state.statusMessage = message.trim();
+  state.customStatus = true;
+  store.updateRegistration(state, dirs, ctx);
+  return result(
+    `Status set to: ${state.statusMessage}`,
+    { mode: "set_status", message: state.statusMessage }
+  );
+}
+
+export function executeFeed(
+  dirs: Dirs,
+  limit?: number,
+  crewEventsInFeed: boolean = true
+) {
+  const effectiveLimit = limit ?? 20;
+  let events: FeedEvent[];
+  if (!crewEventsInFeed) {
+    events = readFeedEvents(dirs, effectiveLimit * 2);
+    events = events.filter(e => !isCrewEvent(e.type));
+    events = events.slice(-effectiveLimit);
+  } else {
+    events = readFeedEvents(dirs, effectiveLimit);
+  }
+
+  if (events.length === 0) {
+    return result(
+      "# Activity Feed\n\nNo activity yet.",
+      { mode: "feed", events: [] }
+    );
+  }
+
+  const lines: string[] = [`# Activity Feed (last ${events.length})`, ""];
+  for (const event of events) {
+    lines.push(formatFeedLine(event));
+  }
+
+  return result(lines.join("\n"), { mode: "feed", events });
+}
+
+export function executeWhois(
+  state: MessengerState,
+  dirs: Dirs,
+  name: string,
+  config?: { stuckThreshold?: number }
+) {
+  if (!state.registered) {
+    return notRegisteredError();
+  }
+
+  const thresholdMs = (config?.stuckThreshold ?? 900) * 1000;
+
+  const agents = store.getActiveAgents(state, dirs);
+  const agent = agents.find(a => a.name === name);
+  if (!agent) {
+    if (name === state.agentName) {
+      return executeWhoisSelf(state, dirs, thresholdMs);
+    }
+    return result(
+      `Agent "${name}" not found or not active.`,
+      { mode: "whois", error: "not_found", name }
+    );
+  }
+
+  return formatWhoisOutput(agent, false, dirs, thresholdMs);
+}
+
+function executeWhoisSelf(
+  state: MessengerState,
+  dirs: Dirs,
+  thresholdMs: number
+) {
+  return formatWhoisOutput(buildSelfRegistration(state), true, dirs, thresholdMs);
+}
+
+function formatWhoisOutput(
+  agent: AgentRegistration,
+  isSelf: boolean,
+  dirs: Dirs,
+  thresholdMs: number
+) {
+  const allClaims = store.getClaims(dirs);
+  const hasTask = agentHasTask(agent.name, allClaims, crewStore.getTasks(agent.cwd));
+
+  const computed = computeStatus(
+    agent.activity?.lastActivityAt ?? agent.startedAt,
+    hasTask,
+    (agent.reservations?.length ?? 0) > 0,
+    thresholdMs
+  );
+
+  const indicator = STATUS_INDICATORS[computed.status];
+  const statusLabel = computed.status.charAt(0).toUpperCase() + computed.status.slice(1);
+  const idleStr = computed.idleFor ? ` for ${computed.idleFor}` : "";
+
+  const sessionAge = formatDuration(Date.now() - new Date(agent.startedAt).getTime());
+  const tokens = agent.session?.tokens ?? 0;
+  const tokenStr = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`;
+
+  const lines: string[] = [];
+  lines.push(`# ${agent.name}${isSelf ? " (you)" : ""}`, "");
+  lines.push(`${indicator} ${statusLabel}${idleStr}`);
+  if (agent.model) lines.push(`Model: ${agent.model}`);
+  if (agent.gitBranch) lines.push(`Branch: ${agent.gitBranch}`);
+  lines.push(`Session: ${sessionAge} - ${agent.session?.toolCalls ?? 0} tool calls - ${tokenStr} tokens`);
+
+  if (agent.statusMessage) {
+    lines.push(`Status: ${agent.statusMessage}`);
+  }
+
+  if (agent.reservations && agent.reservations.length > 0) {
+    lines.push("", "## Reservations");
+    for (const r of agent.reservations) {
+      lines.push(`- ${r.pattern}${r.reason ? ` (${r.reason})` : ""}`);
+    }
+  }
+
+  if (agent.session?.filesModified && agent.session.filesModified.length > 0) {
+    lines.push("", "## Recent Files");
+    for (const f of agent.session.filesModified.slice(-10)) {
+      lines.push(`- ${f}`);
+    }
+  }
+
+  const allFeedEvents = readFeedEvents(dirs, 100);
+  const agentEvents = allFeedEvents.filter(e => e.agent === agent.name).slice(-10);
+  if (agentEvents.length > 0) {
+    lines.push("", "## Recent Activity");
+    for (const e of agentEvents) {
+      lines.push(`- ${formatFeedLine(e)}`);
+    }
+  }
+
+  return result(lines.join("\n"), { mode: "whois", agent });
 }
 
 export function executeAutoRegisterPath(

@@ -195,6 +195,3 @@ async function runAgent(
   });
 }
 
-// Alias for semantic clarity
-export const spawnWorkers = spawnAgents;
-export type WorkerResult = AgentResult;

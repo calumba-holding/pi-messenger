@@ -95,6 +95,9 @@ export interface CrewParams {
   // Task reset
   cascade?: boolean;
 
+  // Feed
+  limit?: number;
+
   // Coordination (existing)
   spec?: string;
   to?: string | string[];

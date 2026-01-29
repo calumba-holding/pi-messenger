@@ -72,9 +72,11 @@ Create a plan from your PRD:
   if (inProgress.length > 0) {
     text += `\n🔄 **In Progress**\n`;
     for (const t of inProgress) {
-      const agent = t.assigned_to ? ` (${t.assigned_to}` : "";
-      const attempt = t.attempt_count > 1 ? `, attempt ${t.attempt_count}` : "";
-      text += `  - ${t.id}: ${t.title}${agent}${attempt}${t.assigned_to ? ")" : ""}\n`;
+      const parts: string[] = [];
+      if (t.assigned_to) parts.push(t.assigned_to);
+      if (t.attempt_count > 1) parts.push(`attempt ${t.attempt_count}`);
+      const suffix = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+      text += `  - ${t.id}: ${t.title}${suffix}\n`;
     }
   }
 
@@ -96,7 +98,9 @@ Create a plan from your PRD:
   if (blocked.length > 0) {
     text += `\n🚫 **Blocked**\n`;
     for (const t of blocked) {
-      const reason = t.blocked_reason ? ` (${t.blocked_reason.slice(0, 40)}...)` : "";
+      const reason = t.blocked_reason
+        ? ` (${t.blocked_reason.length > 40 ? t.blocked_reason.slice(0, 40) + "..." : t.blocked_reason})`
+        : "";
       text += `  - ${t.id}: ${t.title}${reason}\n`;
     }
   }

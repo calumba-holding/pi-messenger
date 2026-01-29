@@ -48,18 +48,3 @@ export function appendJsonl(filePath: string, line: string): void {
   fs.appendFileSync(filePath, `${line}\n`);
 }
 
-export function cleanupOldArtifacts(dir: string, maxAgeDays: number): void {
-  if (!fs.existsSync(dir)) return;
-  const cutoff = Date.now() - (maxAgeDays * 24 * 60 * 60 * 1000);
-
-  for (const file of fs.readdirSync(dir)) {
-    const filePath = path.join(dir, file);
-    try {
-      if (fs.statSync(filePath).mtimeMs < cutoff) {
-        fs.unlinkSync(filePath);
-      }
-    } catch {
-      // Ignore errors
-    }
-  }
-}

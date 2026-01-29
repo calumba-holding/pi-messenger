@@ -28,17 +28,3 @@ export function allocateTaskId(cwd: string): string {
   return `task-${maxN + 1}`;
 }
 
-/**
- * Validates that an ID is a well-formed task ID.
- */
-export function isValidTaskId(id: string): boolean {
-  return /^task-\d+$/.test(id);
-}
-
-/**
- * Extracts the task number from a task ID.
- */
-export function getTaskNumber(taskId: string): number | null {
-  const match = taskId.match(/^task-(\d+)$/);
-  return match ? parseInt(match[1], 10) : null;
-}
