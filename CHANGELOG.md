@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0] - 2026-02-05
+
+### Added
+- **npm publishing** - Package now published to npm. Install with `pi install npm:pi-messenger`.
+- **`install.mjs`** - `npx pi-messenger` copies the npm package contents to the extensions directory. No git dependency. Version-pinned to the npm release. `npx pi-messenger --remove` to uninstall.
+- `repository`, `homepage`, `bugs` fields in package.json for npm/GitHub integration.
+- `bin`, `files` fields in package.json for npm distribution.
+
+### Changed
+- **Banner image** - README references `banner.png` via absolute GitHub URL (`raw.githubusercontent.com`) instead of relative path, so it renders on both GitHub and npmjs.com without shipping the 1.1MB image in the npm package.
+- **Install section** - README now documents `pi install npm:pi-messenger` as the primary install method.
+
 ## [0.8.2] - 2026-02-01
 
 ### Fixed

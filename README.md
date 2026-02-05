@@ -1,5 +1,5 @@
 <p>
-  <img src="banner.png" alt="pi-messenger" width="1100">
+  <img src="https://raw.githubusercontent.com/nicobailon/pi-messenger/main/banner.png" alt="pi-messenger" width="1100">
 </p>
 
 # Pi Messenger
@@ -45,12 +45,16 @@ pi_messenger({ action: "work", autonomous: true })
 
 > **Note:** Crew agents (planner, workers, reviewers) automatically join the mesh as their first action.
 
-## Install
+## Installation
 
-Copy to your extensions directory and restart pi:
-
+```bash
+pi install npm:pi-messenger
 ```
-~/.pi/agent/extensions/pi-messenger/
+
+To remove:
+
+```bash
+npx pi-messenger --remove
 ```
 
 After joining, your agent name appears in the status bar:
