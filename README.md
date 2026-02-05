@@ -85,27 +85,7 @@ msg: SwiftRaven (2 peers) ●3
 
 `/messenger` opens an interactive overlay with agent presence, activity feed, and chat:
 
-```
-╭─ Messenger ── 3 agents ── myapp ────────────────────╮
-│                                                      │
-│ 🟢 SwiftRaven (you)                                  │
-│    editing login.ts - 12 tools - 31.0k - on fire 🔥  │
-│                                                      │
-│ 🟡 GoldFalcon                             idle 2m    │
-│    8 tools - 24.1k - 📁 src/api/                     │
-│                                                      │
-│ 🔴 IronKnight                             stuck      │
-│    3 tools - 16.4k                                   │
-│                                                      │
-│ Activity                                             │
-│ 10:42 SwiftRaven editing login.ts                    │
-│ 10:40 GoldFalcon → SwiftRaven: "auth done?"          │
-│ 10:38 SwiftRaven committed "feat: add OAuth"         │
-│ 10:35 [Crew] GoldFalcon started task-03              │
-├──────────────────────────────────────────────────────┤
-│ > @GoldFalcon almost done                [Tab] [Enter]│
-╰──────────────────────────────────────────────────────╯
-```
+<img width="722" height="351" alt="pi-messenger chat overlay" src="https://github.com/user-attachments/assets/4d0f1db7-90dd-4ffb-9463-560426edebd9" />
 
 Chat input supports `@Name msg` for DMs and `@all msg` for broadcasts. Text without `@` broadcasts from the Agents tab or DMs the selected agent tab.
 
