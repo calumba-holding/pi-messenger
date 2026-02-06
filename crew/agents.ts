@@ -6,6 +6,8 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverCrewAgents, type CrewAgentConfig } from "./utils/discover.js";
@@ -31,6 +33,7 @@ import type { AgentTask, AgentResult } from "./types.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const EXTENSION_DIR = path.resolve(__dirname, "..");
+const BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
 
 export interface SpawnOptions {
   onProgress?: (results: AgentResult[]) => void;
@@ -113,11 +116,40 @@ async function runAgent(
 
   return new Promise((resolve) => {
     // Build args for pi command
-    const args = ["--mode", "json", "--agent", task.agent, "-p", task.task];
+    const args = ["--mode", "json", "--no-session", "-p"];
     if (agentConfig?.model) args.push("--model", agentConfig.model);
-    
+
+    if (agentConfig?.tools?.length) {
+      const builtinTools: string[] = [];
+      const extensionPaths: string[] = [];
+      for (const tool of agentConfig.tools) {
+        if (tool.includes("/") || tool.endsWith(".ts") || tool.endsWith(".js")) {
+          extensionPaths.push(tool);
+        } else if (BUILTIN_TOOLS.has(tool)) {
+          builtinTools.push(tool);
+        }
+      }
+
+      if (builtinTools.length > 0) {
+        args.push("--tools", builtinTools.join(","));
+      }
+      for (const extensionPath of extensionPaths) {
+        args.push("--extension", extensionPath);
+      }
+    }
+
     // Pass extension so workers can use pi_messenger
     args.push("--extension", EXTENSION_DIR);
+
+    let promptTmpDir: string | null = null;
+    if (agentConfig?.systemPrompt) {
+      promptTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-messenger-agent-"));
+      const promptPath = path.join(promptTmpDir, `${task.agent.replace(/[^\w.-]/g, "_")}.md`);
+      fs.writeFileSync(promptPath, agentConfig.systemPrompt, { mode: 0o600 });
+      args.push("--append-system-prompt", promptPath);
+    }
+
+    args.push(task.task);
 
     const proc = spawn("pi", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
 
@@ -166,6 +198,10 @@ async function runAgent(
         });
       }
 
+      if (promptTmpDir) {
+        try { fs.rmSync(promptTmpDir, { recursive: true, force: true }); } catch {}
+      }
+
       resolve({
         agent: task.agent,
         exitCode: code ?? 1,
@@ -194,4 +230,3 @@ async function runAgent(
     }
   });
 }
-

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0] - 2026-02-05
+
+### Fixed
+- **Crew spawner applies agent definitions** — Spawned crew workers now receive the agent's system prompt (`--append-system-prompt`), tool restrictions (`--tools`), and model override from their `.md` definitions. Previously a phantom `--agent` flag was passed that pi-core silently ignored, the agent name leaked into the prompt as noise, and the system prompts (worker's 6-phase protocol, reviewer's rubric, planner's exploration workflow) were never delivered. Tool restrictions also take effect: reviewers and interview generators are now limited to `read,bash` instead of getting all default builtins including `write` and `edit`.
+- **Crew spawner session cleanup** — Spawned workers now pass `--no-session` to avoid writing ephemeral session files to disk.
+
+### Added
+- **`--crew-install` / `--crew-uninstall` CLI flags** — `npx pi-messenger --crew-install` copies crew agent `.md` files and the `pi-messenger-crew` skill to user directories. `--crew-uninstall` removes them. Reads from the npm package (not the installed extension) to avoid version skew.
+
+### Changed
+- **README rewrite** — Installation section now shows real CLI commands instead of tool-call syntax. "How It Works" section explains pi extension API hooks (`pi.on()`, `pi.sendMessage()`, `{ block: true }`, `ctx.ui.custom()`) instead of listing directory trees.
+
 ## [0.9.0] - 2026-02-05
 
 ### Added

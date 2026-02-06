@@ -16,19 +16,25 @@
 pi install npm:pi-messenger
 ```
 
-Crew agents and the `pi-messenger-crew` skill are auto-installed to `~/.pi/agent/agents/` and `~/.pi/agent/skills/` on first use of `plan`, `work`, or `review`. To install them manually:
+Crew agents and the `pi-messenger-crew` skill are auto-installed on first use of `plan`, `work`, or `review`. To install them ahead of time:
 
-```typescript
-pi_messenger({ action: "crew.install" })
+```bash
+npx pi-messenger --crew-install
 ```
 
-To remove:
+This copies `crew/agents/*.md` to `~/.pi/agent/agents/` and `skills/pi-messenger-crew/` to `~/.pi/agent/skills/`.
+
+To remove the extension:
 
 ```bash
 npx pi-messenger --remove
 ```
 
-This removes the extension. To also remove crew agents and skill: `pi_messenger({ action: "crew.uninstall" })` before removing.
+To also remove crew agents and skill:
+
+```bash
+npx pi-messenger --crew-uninstall
+```
 
 ## Quick Start
 
@@ -123,7 +129,7 @@ Add to `~/.pi/agent/pi-messenger.json`:
 }
 ```
 
-Crew agents (planner, worker, reviewer, interview-generator, plan-sync) are **auto-installed** on first use. Run `{ action: "crew.install" }` to manually install or update.
+Crew agents (planner, worker, reviewer, interview-generator, plan-sync) are **auto-installed** on first use. Run `npx pi-messenger --crew-install` to manually install or update.
 
 ## API Reference
 
@@ -206,28 +212,13 @@ Config priority: project `.pi/pi-messenger.json` > user `~/.pi/agent/pi-messenge
 
 ## How It Works
 
-File-based coordination. No daemon. Dead agents detected via PID and cleaned up automatically.
+Pi-messenger is a [pi extension](https://github.com/badlogic/pi-mono) that hooks into the agent lifecycle. It uses `pi.on("tool_call")` and `pi.on("tool_result")` to track activity — every edit, commit, and test run gets logged. `pi.on("session_start")` handles auto-registration, `pi.on("session_shutdown")` cleans up, and `pi.on("agent_end")` drives autonomous crew mode by checking for ready tasks after each agent turn.
 
-```
-~/.pi/agent/messenger/           # Shared across all projects
-├── registry/                    # Agent registrations (PID, cwd, model, activity, tokens)
-├── inbox/                       # Message delivery (one directory per agent)
-├── feed.jsonl                   # Activity feed (append-only, pruned on startup)
-├── claims.json                  # Swarm task claims
-├── completions.json             # Completed swarm tasks
-└── swarm.lock                   # Atomic lock for claims
+Incoming messages wake the receiving agent via `pi.sendMessage()` with `triggerTurn: true` and `deliverAs: "steer"`, which injects the message as a steering prompt that resumes the agent. File reservations are enforced by returning `{ block: true }` from a `tool_call` hook on write/edit operations. The `/messenger` overlay uses `ctx.ui.custom()` for the chat TUI, and `ctx.ui.setStatus()` keeps the status bar updated with peer count and unread messages.
 
-.pi/messenger/crew/              # Per-project crew data
-├── plan.json                    # Plan metadata (PRD path, progress)
-├── plan.md                      # Planner output
-├── planning-progress.md         # Planning loop history + reviewer feedback
-├── tasks/                       # Task metadata (.json) and specs (.md)
-├── blocks/                      # Block context for blocked tasks
-├── artifacts/                   # Debug artifacts (input/output/jsonl per run)
-└── config.json                  # Project-level crew config overrides
-```
+Crew workers are spawned as `pi --mode json` subprocesses with the agent's system prompt, model, and tool restrictions from their `.md` definitions. Progress is tracked via JSONL streaming. The planner and reviewer work the same way — just pi instances with different agent configs.
 
-Activity tracking updates the registry every 10 seconds via debounced flushes. Messages are delivered via file watcher on the inbox directory.
+All coordination is file-based, no daemon required. Global state (registry, inboxes, activity feed) lives in `~/.pi/agent/messenger/`. Per-project crew data (plan, tasks, artifacts) lives in `.pi/messenger/crew/` inside your project. Dead agents are detected via PID checks and cleaned up automatically.
 
 ## Credits
 
