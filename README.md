@@ -268,6 +268,7 @@ Agent definitions live in `crew/agents/` within the extension. To customize one 
 |--------|-------------|
 | `plan` | Create plan from PRD or inline prompt (`prd`, `prompt` optional — auto-discovers PRD if omitted, auto-starts workers unless `autoWork: false`) |
 | `work` | Run ready tasks (`autonomous`, `concurrency` optional) |
+| `work.stop` | Stop autonomous work for the current project |
 | `review` | Review implementation (`target` task ID required) |
 | `task.list` | List all tasks |
 | `task.show` | Show task details (`id` required) |

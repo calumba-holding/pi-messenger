@@ -58,6 +58,7 @@ import {
   restoreAutonomousState,
   restorePlanningState,
   stopAutonomous,
+  isAutonomousForCwd,
 } from "./crew/state.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
 import * as crewStore from "./crew/store.js";
@@ -295,6 +296,24 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   const STATUS_HEARTBEAT_MS = 15_000;
   let latestCtx: ExtensionContext | null = null;
   let statusHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  const AUTONOMOUS_CONTINUE_REPEAT_LIMIT = 3;
+  let autonomousContinueSignature: string | null = null;
+  let autonomousContinueRepeats = 0;
+
+  function resetAutonomousContinueGuard(): void {
+    autonomousContinueSignature = null;
+    autonomousContinueRepeats = 0;
+  }
+
+  function trackAutonomousContinue(signature: string): number {
+    if (autonomousContinueSignature === signature) {
+      autonomousContinueRepeats += 1;
+    } else {
+      autonomousContinueSignature = signature;
+      autonomousContinueRepeats = 1;
+    }
+    return autonomousContinueRepeats;
+  }
 
   function startStatusHeartbeat(): void {
     if (statusHeartbeatTimer) return;
@@ -358,6 +377,7 @@ Usage (action-based API - preferred):
   // Crew: Work through tasks
   pi_messenger({ action: "work" })                              → Run ready tasks
   pi_messenger({ action: "work", autonomous: true })            → Run until done/blocked
+  pi_messenger({ action: "work.stop" })                         → Stop autonomous work for this project
   
   // Crew: Tasks
   pi_messenger({ action: "task.show", id: "task-1" })           → Show task
@@ -749,6 +769,7 @@ Usage (action-based API - preferred):
 
   pi.on("session_start", async (_event, ctx) => {
     latestCtx = ctx;
+    resetAutonomousContinueGuard();
     startStatusHeartbeat();
     for (const entry of ctx.sessionManager.getEntries()) {
       if (entry.type === "custom" && entry.customType === "crew-state") {
@@ -870,6 +891,7 @@ Usage (action-based API - preferred):
 
   pi.on("session_switch", async (_event, ctx) => {
     latestCtx = ctx;
+    resetAutonomousContinueGuard();
     const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
     if (staleCleared && ctx.hasUI) {
       ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
@@ -880,6 +902,7 @@ Usage (action-based API - preferred):
   });
   pi.on("session_fork", async (_event, ctx) => {
     latestCtx = ctx;
+    resetAutonomousContinueGuard();
     const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
     if (staleCleared && ctx.hasUI) {
       ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
@@ -936,6 +959,22 @@ Usage (action-based API - preferred):
   // ===========================================================================
 
   pi.on("agent_end", async (_event, ctx) => {
+    if (process.env.PI_CREW_WORKER === "1" || process.env.PI_LOBBY_ID) {
+      return;
+    }
+
+    if (!state.registered) {
+      if (autonomousState.active) {
+        stopAutonomous("manual");
+        pi.appendEntry("crew-state", autonomousState);
+        resetAutonomousContinueGuard();
+        if (ctx.hasUI) {
+          ctx.ui.notify("Autonomous stopped: this session is not registered in pi-messenger.", "warning");
+        }
+      }
+      return;
+    }
+
     // --- Auto-work after plan completion ---
     const autoWork = consumePendingAutoWork();
     if (autoWork && !overlayTui) {
@@ -955,15 +994,26 @@ Usage (action-based API - preferred):
     }
 
     // --- Existing autonomous continuation ---
-    if (!autonomousState.active) return;
+    if (!autonomousState.active) {
+      resetAutonomousContinueGuard();
+      return;
+    }
 
-    const cwd = autonomousState.cwd ?? ctx.cwd ?? process.cwd();
+    const currentCwd = ctx.cwd ?? process.cwd();
+    if (!isAutonomousForCwd(currentCwd)) {
+      resetAutonomousContinueGuard();
+      return;
+    }
+
+    const cwd = autonomousState.cwd ?? currentCwd;
     const crewDir = join(cwd, ".pi", "messenger", "crew");
     const crewConfig = loadCrewConfig(crewDir);
 
     // Check max waves limit
     if (autonomousState.waveNumber >= crewConfig.work.maxWaves) {
       stopAutonomous("manual");
+      pi.appendEntry("crew-state", autonomousState);
+      resetAutonomousContinueGuard();
       if (ctx.hasUI) {
         ctx.ui.notify(`Autonomous stopped: max waves (${crewConfig.work.maxWaves}) reached`, "warning");
       }
@@ -972,14 +1022,16 @@ Usage (action-based API - preferred):
 
     // Check for ready tasks
     const readyTasks = crewStore.getReadyTasks(cwd, { advisory: crewConfig.dependencies === "advisory" });
-    
+
     if (readyTasks.length === 0) {
       // No ready tasks - check if all done or blocked
       const allTasks = crewStore.getTasks(cwd);
       const allDone = allTasks.every(t => t.status === "done");
-      
+
       stopAutonomous(allDone ? "completed" : "blocked");
-      
+      pi.appendEntry("crew-state", autonomousState);
+      resetAutonomousContinueGuard();
+
       const plan = crewStore.getPlan(cwd);
       if (ctx.hasUI) {
         if (allDone) {
@@ -989,6 +1041,26 @@ Usage (action-based API - preferred):
           ctx.ui.notify(`Autonomous stopped: ${blocked.length} task(s) blocked`, "warning");
         }
       }
+      return;
+    }
+
+    const continueSignature = `${cwd}:${autonomousState.waveNumber}:${readyTasks.map(task => task.id).sort().join(",")}`;
+    const continueRepeatCount = trackAutonomousContinue(continueSignature);
+    if (continueRepeatCount >= AUTONOMOUS_CONTINUE_REPEAT_LIMIT) {
+      stopAutonomous("manual");
+      pi.appendEntry("crew-state", autonomousState);
+      resetAutonomousContinueGuard();
+
+      const plan = crewStore.getPlan(cwd);
+      const message = `Autonomous work on ${plan?.prd ?? "plan"} stopped after ${continueRepeatCount} repeated continuation retries without wave progress. Resolve the abort condition, then run pi_messenger({ action: "work", autonomous: true }).`;
+      if (ctx.hasUI) {
+        ctx.ui.notify(message, "warning");
+      }
+      pi.sendMessage({
+        customType: "crew_continue_stopped",
+        content: message,
+        display: true,
+      });
       return;
     }
 
